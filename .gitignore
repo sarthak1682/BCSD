@@ -1,0 +1,9 @@
+asm2vec_train_temp/
+asm2vec_test_temp/
+outputs/
+logs/
+asm2vec_weights/
+*.pt
+*.log
+__pycache__/
+*.pyc
