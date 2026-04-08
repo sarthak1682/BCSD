@@ -230,4 +230,4 @@ class NovaStudentEmbedder(BaseEmbedder):
         return self.student(input_ids=inputs["input_ids"], key_padding_mask=inputs["key_padding_mask"])
 
     def pool(self, hidden_states: torch.Tensor, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        return self.lal_head(hidden_states)
+        return self.lal_head(hidden_states, key_padding_mask=inputs.get("key_padding_mask"))
