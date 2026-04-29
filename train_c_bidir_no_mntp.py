@@ -196,13 +196,16 @@ def contrastive_loss(embeddings, temperature=0.05, hard_negative_weight=2.0):
     return loss
 
 
+INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
+
+
 pairs = []
 o0_dict = {s['id']: s for s in train_samples if s['opt'] == 'O0'}
 o3_dict = {s['id']: s for s in train_samples if s['opt'] == 'O3'}
 
 for func_id in o0_dict:
     if func_id in o3_dict:
-        pairs.append((o0_dict[func_id]['asm'], o3_dict[func_id]['asm']))
+        pairs.append((INSTRUCT_TEMPLATE + o0_dict[func_id]['asm'], o3_dict[func_id]['asm']))
 
 print(f"pairs: {len(pairs)}")
 
