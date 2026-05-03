@@ -114,8 +114,8 @@ def load_binarycorp_jsonl(path: str):
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-train_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp_train.jsonl"))
-eval_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp_test.jsonl"))
+train_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp_train_nova.jsonl"))
+eval_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp_test_nova.jsonl"))
 
 class PairCollator:
     def __init__(self, nova_tokenizer, max_length=1024):
@@ -209,10 +209,10 @@ for func_id in o0_dict:
 
 print(f"pairs: {len(pairs)}")
 
-batch_size = 16
+batch_size = 32
 grad_accum = 4
 lr = 3e-5
-num_epochs = 1
+num_epochs = 2
 
 pair_collator = PairCollator(nova_tokenizer, max_length=512)
 pair_loader = DataLoader(pairs, batch_size=batch_size, shuffle=True, collate_fn=pair_collator)
@@ -270,179 +270,3 @@ os.makedirs(output_dir, exist_ok=True)
 model.save_pretrained(output_dir)
 torch.save(pooling_head.state_dict(), os.path.join(output_dir, "pooling_head.pt"))
 print(f"saved to {output_dir}")
-
-model.eval()
-pooling_head.eval()
-torch.cuda.empty_cache()
-gc.collect()
-
-
-@torch.no_grad()
-def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_size=16, device="cuda"):
-    model.eval()
-    pooling_module.eval()
-
-    label_ids = tokenizer.labels
-    base_tokenizer = tokenizer.tokenizer
-
-    all_embeddings = []
-    all_ids = []
-    all_opts = []
-
-    print("extracting embeddings...")
-
-    for i in range(0, len(samples), batch_size):
-        batch_samples = samples[i:i+batch_size]
-
-        batch_input_ids = []
-        batch_masks = []
-        batch_label_positions = []
-
-        for sample in batch_samples:
-            text = sample["asm"]
-            result = tokenizer.encode("", text, "1" * len(text))
-
-            ids = result['input_ids'][:1024]
-            raw_mask = result['nova_attention_mask']
-            L = len(ids)
-            mask = np.maximum(raw_mask[:L, :L], raw_mask[:L, :L].T)
-            label_pos = [j for j, tid in enumerate(ids) if tid in label_ids]
-
-            batch_input_ids.append(ids)
-            batch_masks.append(mask)
-            batch_label_positions.append(label_pos)
-
-        max_len = max(len(x) for x in batch_input_ids)
-        pad_id = base_tokenizer.pad_token_id or 0
-        padded_ids = np.full((len(batch_samples), max_len), pad_id, dtype=np.int64)
-        padded_masks = np.zeros((len(batch_samples), max_len, max_len), dtype=np.float32)
-
-        for j, (ids, mask) in enumerate(zip(batch_input_ids, batch_masks)):
-            L = len(ids)
-            padded_ids[j, :L] = ids
-            padded_masks[j, :L, :L] = mask
-
-        input_ids_t = torch.tensor(padded_ids, dtype=torch.long, device=device)
-        nova_mask_t = torch.tensor(padded_masks, dtype=torch.float32, device=device)
-
-        outputs = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t, output_hidden_states=True)
-        hidden = outputs.hidden_states[-1]
-
-        pooled = pooling_module(hidden, batch_label_positions)
-        all_embeddings.append(pooled.cpu())
-
-        all_ids.extend([s["id"] for s in batch_samples])
-        all_opts.extend([s["opt"] for s in batch_samples])
-
-        if i % 500 == 0:
-            print(f"Extracted {i}/{len(samples)}")
-
-    embeddings_tensor = torch.cat(all_embeddings, dim=0)
-    return {"ids": all_ids, "opts": all_opts, "embeddings": embeddings_tensor}
-
-
-def compute_recall_at_k(result, k=1):
-    ids = result['ids']
-    opts = result['opts']
-    embs = result['embeddings'].float()
-
-    embs = embs / embs.norm(dim=1, keepdim=True)
-
-    o0_idx = [i for i, o in enumerate(opts) if o == 'O0']
-    o3_idx = [i for i, o in enumerate(opts) if o == 'O3']
-
-    o0_ids = [ids[i] for i in o0_idx]
-    o3_ids = [ids[i] for i in o3_idx]
-
-    o0_embs = embs[o0_idx]
-    o3_embs = embs[o3_idx]
-
-    o3_id_to_idx = {id_: i for i, id_ in enumerate(o3_ids)}
-
-    sim_matrix = o0_embs @ o3_embs.T
-
-    correct = 0
-    for i, o0_id in enumerate(o0_ids):
-        if o0_id not in o3_id_to_idx:
-            continue
-        correct_o3_idx = o3_id_to_idx[o0_id]
-        top_k_indices = sim_matrix[i].topk(k).indices.tolist()
-        if correct_o3_idx in top_k_indices:
-            correct += 1
-
-    return correct / len(o0_ids)
-
-
-def compute_recall_at_k_pooled(result, k_recall=1, pool_size=50, num_trials=10):
-    ids = result['ids']
-    opts = result['opts']
-    embs = result['embeddings'].float()
-
-    embs = embs / embs.norm(dim=1, keepdim=True)
-
-    o0_idx = [i for i, o in enumerate(opts) if o == 'O0']
-    o3_idx = [i for i, o in enumerate(opts) if o == 'O3']
-
-    o0_ids = [ids[i] for i in o0_idx]
-    o3_ids = [ids[i] for i in o3_idx]
-
-    paired_ids = list(set(o0_ids) & set(o3_ids))
-
-    total_correct = 0
-    total_queries = 0
-
-    for trial in range(num_trials):
-        if len(paired_ids) < pool_size:
-            sampled_ids = paired_ids
-        else:
-            sampled_ids = np.random.choice(paired_ids, pool_size, replace=False)
-
-        sampled_o0_idx = [o0_idx[o0_ids.index(fid)] for fid in sampled_ids if fid in o0_ids]
-        sampled_o3_idx = [o3_idx[o3_ids.index(fid)] for fid in sampled_ids if fid in o3_ids]
-
-        o0_embs_pool = embs[sampled_o0_idx]
-        o3_embs_pool = embs[sampled_o3_idx]
-
-        sim_matrix = o0_embs_pool @ o3_embs_pool.T
-
-        for i in range(len(sampled_ids)):
-            top_k_indices = sim_matrix[i].topk(k_recall).indices.tolist()
-            if i in top_k_indices:
-                total_correct += 1
-            total_queries += 1
-
-    return total_correct / total_queries
-
-
-eval_result = extract_embeddings_smart(
-    model=model,
-    tokenizer=nova_tokenizer,
-    pooling_module=pooling_head,
-    samples=eval_samples,
-    batch_size=16,
-    device=device
-)
-
-save_name = os.path.join(script_dir, "embeddings_bidir_contrastive_noMNTP_test.pt")
-torch.save(eval_result, save_name)
-print(f"embeddings shape: {eval_result['embeddings'].shape}")
-
-print("recall (pooled):")
-r1_k50  = compute_recall_at_k_pooled(eval_result, k_recall=1, pool_size=50,  num_trials=100)
-r1_k100 = compute_recall_at_k_pooled(eval_result, k_recall=1, pool_size=100, num_trials=100)
-r1_k200 = compute_recall_at_k_pooled(eval_result, k_recall=1, pool_size=200, num_trials=100)
-r1_k500 = compute_recall_at_k_pooled(eval_result, k_recall=1, pool_size=500, num_trials=100)
-
-print(f"Recall@1 (K=50):  {r1_k50:.4f}")
-print(f"Recall@1 (K=100): {r1_k100:.4f}")
-print(f"Recall@1 (K=200): {r1_k200:.4f}")
-print(f"Recall@1 (K=500): {r1_k500:.4f}")
-
-print("recall (full):")
-recall_1  = compute_recall_at_k(eval_result, k=1)
-recall_5  = compute_recall_at_k(eval_result, k=5)
-recall_10 = compute_recall_at_k(eval_result, k=10)
-
-print(f"Recall@1:  {recall_1:.4f}")
-print(f"Recall@5:  {recall_5:.4f}")
-print(f"Recall@10: {recall_10:.4f}")
