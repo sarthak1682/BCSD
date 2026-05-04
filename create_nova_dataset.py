@@ -2,16 +2,17 @@
 """
 Nova Dataset Extraction Pipeline
 
-This script extracts BinaryCorp `.pkl` files and prepares them specifically for the Nova-1.3b model. 
-The core normalization logic (`normalize_binarycorp_function`) is directly adapted from the 
-original authors' `normalize.py` script in the official Hugging Face repository (https://huggingface.co/spaces/ejschwartz/nova-6.7b/tree/main)
+Extracts BinaryCorp .pkl files for use with the Nova-1.3b model.
 
-Key adaptations from the original code:
-- Replaces absolute jump targets with `<label-N>` tokens (or `<unk>` if external).
-- Hard-truncates sequences to 256 labels to match Nova's tokenizer constraints.
-- Applies the original AT&T regex cleanups (hex to decimal, stripping '%', and spacing punctuation).
-- Safely handles IDA-specific hex formatting (e.g., '38h') found in the BinaryCorp dataset.
+Normalization logic (normalize_binarycorp_function) is adapted from the authors'
+normalize.py in the official HF repo:
+https://huggingface.co/spaces/ejschwartz/nova-6.7b/tree/main
 
+Changes from the original:
+- Jump targets replaced with <label-N> tokens (or <unk> if external)
+- Sequences hard-truncated to 256 labels (Nova tokenizer limit)
+- AT&T regex cleanups: hex→decimal, strip '%', space punctuation
+- Added handling for BinaryCorp hex format (e.g. '38h')
 
 """
 
@@ -156,7 +157,6 @@ def extract_and_convert(tar_path, output_jsonl, opts=['O0', 'O3'], limit=None):
                 
                 for opt in opts:
                     func_data = opt_data[opt][func_name]
-                    # We no longer pre-truncate here; we let normalize_binarycorp_function handle it
                     func_addr, asm_list = func_data[0], func_data[1]
                     
                     # Normalizes jump targets, converts hex, spacing, and assigns unique labels
@@ -173,5 +173,5 @@ def extract_and_convert(tar_path, output_jsonl, opts=['O0', 'O3'], limit=None):
 # Convert test set
 extract_and_convert(TEST_TAR, "binarycorp_test_nova.jsonl")
 
-# Convert train set (optional, larger)
+# Convert train set
 extract_and_convert(TRAIN_TAR, "binarycorp_train_nova.jsonl")
