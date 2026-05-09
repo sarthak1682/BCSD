@@ -87,21 +87,32 @@ class AttentionPooling(torch.nn.Module):
         )
 
     def forward(self, hidden_states, label_positions):
-        pooled_outputs = []
+        # hidden_states: [B, L, D]
+        B, L, D = hidden_states.shape
+        device = hidden_states.device
+        
+        # [B, L, 1] -> [B, L]
+        attn_scores = self.attention(hidden_states).squeeze(-1)
+        
+        mask = torch.zeros((B, L), dtype=torch.bool, device=device)
         for i, pos_list in enumerate(label_positions):
-            valid_pos = [p for p in pos_list if p < hidden_states.shape[1]]
-
-            if not valid_pos:
-                pooled_outputs.append(hidden_states[i].mean(dim=0))
-                continue
-
-            inst_vectors = hidden_states[i, valid_pos, :]
-            attn_scores = self.attention(inst_vectors)
-            attn_weights = torch.softmax(attn_scores, dim=0)
-            weighted_avg = torch.sum(inst_vectors * attn_weights, dim=0)
-            pooled_outputs.append(weighted_avg)
-
-        return torch.stack(pooled_outputs)
+            valid_pos = [p for p in pos_list if p < L]
+            if valid_pos:
+                mask[i, valid_pos] = True
+            else:
+                # Fallback: if no valid label positions, pool over the whole sequence
+                mask[i, :] = True
+                
+        # Mask out invalid positions
+        attn_scores = attn_scores.masked_fill(~mask, float('-inf'))
+        
+        # Softmax over sequence length
+        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1) # [B, L, 1]
+        
+        # Weighted sum: [B, L, D] * [B, L, 1] -> [B, D]
+        pooled_outputs = torch.sum(hidden_states * attn_weights, dim=1)
+        
+        return pooled_outputs
 
 
 def load_binarycorp_jsonl(path: str):
@@ -131,8 +142,15 @@ class PairCollator:
 
         all_ids, all_masks, all_label_positions = [], [], []
 
+        instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
         for text in flat_texts:
-            result = self.nova_tokenizer.encode("", text, "1" * len(text))
+            # Assign type '0' to the template for global visibility, and '1' to assembly
+            if text.startswith(instruct_template):
+                asm_len = len(text) - len(instruct_template)
+                char_types = "0" * len(instruct_template) + "1" * asm_len
+            else:
+                char_types = "1" * len(text)
+            result = self.nova_tokenizer.encode("", text, char_types)
 
             ids = result['input_ids'][:self.max_length]
 
@@ -163,7 +181,7 @@ class PairCollator:
         }
 
 
-def contrastive_loss(embeddings, temperature=0.05, hard_negative_weight=2.0):
+def contrastive_loss(embeddings, temperature=0.05):
     embeddings = F.normalize(embeddings, p=2, dim=1)
     sim_matrix = torch.matmul(embeddings, embeddings.T) / temperature
     batch_size = embeddings.shape[0]
@@ -174,23 +192,6 @@ def contrastive_loss(embeddings, temperature=0.05, hard_negative_weight=2.0):
 
     mask_self = torch.eye(batch_size, device=embeddings.device).bool()
     sim_matrix.masked_fill_(mask_self, -1e9)
-
-    mask_pos = torch.zeros_like(sim_matrix).bool()
-    mask_pos.scatter_(1, labels.unsqueeze(1), 1)
-
-    with torch.no_grad():
-        neg_matrix = sim_matrix.clone()
-        neg_matrix.masked_fill_(mask_pos, -1e9)
-        neg_matrix.masked_fill_(mask_self, -1e9)
-
-        k = min(3, batch_size - 2)
-        topk_values, topk_indices = torch.topk(neg_matrix, k=k, dim=1)
-
-    weights = torch.ones_like(sim_matrix)
-    hard_weight_tensor = torch.full_like(topk_values, hard_negative_weight)
-    weights.scatter_(1, topk_indices, hard_weight_tensor)
-
-    sim_matrix = sim_matrix * weights
 
     loss = F.cross_entropy(sim_matrix, labels)
     return loss
@@ -212,9 +213,9 @@ print(f"pairs: {len(pairs)}")
 batch_size = 32
 grad_accum = 4
 lr = 3e-5
-num_epochs = 2
+num_epochs = 1
 
-pair_collator = PairCollator(nova_tokenizer, max_length=512)
+pair_collator = PairCollator(nova_tokenizer, max_length=1024)
 pair_loader = DataLoader(pairs, batch_size=batch_size, shuffle=True, collate_fn=pair_collator)
 
 pooling_head = AttentionPooling(model.config.hidden_size).to(device).to(torch.bfloat16)

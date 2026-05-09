@@ -45,6 +45,7 @@ DORA_CFG = dict(
     bias           = "none",
     target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
                       "gate_proj", "up_proj", "down_proj"],
+    modules_to_save= ["embed_tokens", "lm_head"],
 )
 
 # Hyperparameters
@@ -145,18 +146,30 @@ class AttentionPooling(torch.nn.Module):
         hidden_states: [batch, seq_len, hidden_dim]
         label_positions: List of lists (indices of <label-N> tokens)
         """
-        pooled_outputs = []
+        B, L, D = hidden_states.shape
+        device = hidden_states.device
+        
+        # [B, L, 1] -> [B, L]
+        attn_scores = self.attention(hidden_states).squeeze(-1)
+        
+        mask = torch.zeros((B, L), dtype=torch.bool, device=device)
         for i, pos_list in enumerate(label_positions):
-            valid_pos = [p for p in pos_list if p < hidden_states.shape[1]]
-            if not valid_pos:
-                pooled_outputs.append(hidden_states[i].mean(dim=0))
-                continue
-            inst_vectors = hidden_states[i, valid_pos, :]
-            attn_scores  = self.attention(inst_vectors)
-            attn_weights = torch.softmax(attn_scores, dim=0)
-            weighted_avg = torch.sum(inst_vectors * attn_weights, dim=0)
-            pooled_outputs.append(weighted_avg)
-        return torch.stack(pooled_outputs)
+            valid_pos = [p for p in pos_list if p < L]
+            if valid_pos:
+                mask[i, valid_pos] = True
+            else:
+                # Fallback: if no valid label positions, pool over the whole sequence
+                mask[i, :] = True
+                
+        # Mask out invalid positions
+        attn_scores = attn_scores.masked_fill(~mask, float('-inf'))
+        
+        # Softmax over sequence length
+        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1) # [B, L, 1]
+        
+        # Weighted sum: [B, L, D] * [B, L, 1] -> [B, D]
+        pooled_outputs = torch.sum(hidden_states * attn_weights, dim=1)
+        return pooled_outputs
 
 
 # Stage 1: Cross-opt translation
@@ -207,7 +220,7 @@ class TranslationCollator:
         return {
             "input_ids":           torch.tensor(p_ids,  dtype=torch.long),
             "labels":              torch.tensor(p_lbls, dtype=torch.long),
-            "nova_attention_mask": torch.tensor(p_msk,  dtype=torch.float32),
+            "nova_attention_mask": torch.tensor(p_msk,  dtype=torch.bfloat16),
         }
 
 
@@ -266,7 +279,7 @@ class MNTPCollator:
         return {
             "input_ids":           torch.tensor(padded_ids),
             "labels":              torch.tensor(padded_labels),
-            "nova_attention_mask": torch.tensor(padded_masks),
+            "nova_attention_mask": torch.tensor(padded_masks, dtype=torch.bfloat16),
         }
 
 
@@ -277,7 +290,8 @@ class ContrastivePairDataset(Dataset):
     def __init__(self, samples: List[Dict]) -> None:
         o0 = {s["id"]: s["asm"] for s in samples if s["opt"] == "O0"}
         o3 = {s["id"]: s["asm"] for s in samples if s["opt"] == "O3"}
-        self.pairs = [(o0[fid], o3[fid]) for fid in o0 if fid in o3]
+        template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
+        self.pairs = [(template + o0[fid], o3[fid]) for fid in o0 if fid in o3]
         print(f"Paired samples: {len(self.pairs)} (Total items: {len(self.pairs) * 2})")
 
     def __len__(self):  return len(self.pairs)
@@ -298,8 +312,14 @@ class PairCollator:
 
         all_ids, all_masks, all_label_positions = [], [], []
 
+        instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
         for text in flat_texts:
-            result = self.nova_tokenizer.encode("", text, "1" * len(text))
+            if text.startswith(instruct_template):
+                asm_len = len(text) - len(instruct_template)
+                char_types = "0" * len(instruct_template) + "1" * asm_len
+            else:
+                char_types = "1" * len(text)
+            result = self.nova_tokenizer.encode("", text, char_types)
 
             ids = result['input_ids'][:self.max_length]
             raw_mask = result['nova_attention_mask']
@@ -323,7 +343,7 @@ class PairCollator:
 
         return {
             "input_ids":           torch.tensor(pad_ids),
-            "nova_attention_mask": torch.tensor(pad_masks),
+            "nova_attention_mask": torch.tensor(pad_masks, dtype=torch.bfloat16),
             "label_positions":     all_label_positions,
         }
 
@@ -342,21 +362,6 @@ def contrastive_loss(embeddings, temperature=0.05, hard_negative_weight=2.0):
 
     mask_self = torch.eye(batch_size, device=embeddings.device).bool()
     sim_matrix.masked_fill_(mask_self, -1e9)
-
-    mask_pos = torch.zeros_like(sim_matrix).bool()
-    mask_pos.scatter_(1, labels.unsqueeze(1), 1)
-
-    with torch.no_grad():
-        neg_matrix = sim_matrix.clone()
-        neg_matrix.masked_fill_(mask_pos,  -1e9)
-        neg_matrix.masked_fill_(mask_self, -1e9)
-        k = min(3, batch_size - 2)
-        topk_values, topk_indices = torch.topk(neg_matrix, k=k, dim=1)
-
-    weights = torch.ones_like(sim_matrix)
-    hard_weight_tensor = torch.full_like(topk_values, hard_negative_weight)
-    weights.scatter_(1, topk_indices, hard_weight_tensor)
-    sim_matrix = sim_matrix * weights
 
     return F.cross_entropy(sim_matrix, labels)
 
@@ -377,6 +382,7 @@ def run_generic_train(
     pooling_head:    Optional[AttentionPooling] = None,
     temperature:     float                     = 0.05,
     hard_neg_weight: float                     = 2.0,
+    mntp:            bool                      = False,
 ) -> None:
     trainable = [p for p in model.parameters() if p.requires_grad]
     if pooling_head is not None:
@@ -414,7 +420,14 @@ def run_generic_train(
                 b = {k: v.to(device) for k, v in batch.items()}
                 if torch.isnan(b["nova_attention_mask"]).any():
                     skipped += 1; optimizer.zero_grad(); continue
-                loss = model(**b).loss
+                
+                if mntp:
+                    outputs = model(**b)
+                    logits = outputs.logits
+                    loss_fct = nn.CrossEntropyLoss()
+                    loss = loss_fct(logits.view(-1, logits.size(-1)), b["labels"].view(-1))
+                else:
+                    loss = model(**b).loss
 
             if not loss.requires_grad or torch.isnan(loss):
                 skipped += 1; optimizer.zero_grad(); continue
@@ -463,9 +476,17 @@ def extract_embeddings(model, pooling_head, nova_tokenizer, samples,
         batch_masks          = []
         batch_label_positions = []
 
+        INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
+        
         for sample in batch_samples:
-            text   = sample["asm"]
-            result = nova_tokenizer.encode("", text, "1" * len(text))
+            if sample["opt"] == "O0":
+                text = INSTRUCT_TEMPLATE + sample["asm"]
+                char_types = "0" * len(INSTRUCT_TEMPLATE) + "1" * len(sample["asm"])
+            else:
+                text = sample["asm"]
+                char_types = "1" * len(text)
+                
+            result = nova_tokenizer.encode("", text, char_types)
 
             input_ids = result['input_ids'][:max_length]
             raw_mask  = result['nova_attention_mask']
@@ -489,7 +510,7 @@ def extract_embeddings(model, pooling_head, nova_tokenizer, samples,
             padded_masks[j, :L, :L] = mask
 
         input_ids_t = torch.tensor(padded_ids,   dtype=torch.long,    device=device)
-        nova_mask_t = torch.tensor(padded_masks, dtype=torch.float32, device=device)
+        nova_mask_t = torch.tensor(padded_masks, dtype=torch.bfloat16, device=device)
 
         outputs      = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t,
                              output_hidden_states=True)
@@ -693,7 +714,7 @@ def main() -> None:
         )
         run_generic_train(model, loader, args.s2_epochs, args.s2_lr,
                           args.s2_grad_accum, args.max_grad_norm,
-                          args.warmup_ratio, args.log_interval, log)
+                          args.warmup_ratio, args.log_interval, log, mntp=True)
 
         model   = model.merge_and_unload()
         s2_ckpt = os.path.join(args.output_dir, "s2_final")

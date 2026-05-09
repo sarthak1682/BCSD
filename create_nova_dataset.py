@@ -8,7 +8,7 @@ Normalization logic (normalize_binarycorp_function) is adapted from the authors'
 normalize.py in the official HF repo:
 https://huggingface.co/spaces/ejschwartz/nova-6.7b/tree/main
 
-Changes from the original:
+Changes:
 - Jump targets replaced with <label-N> tokens (or <unk> if external)
 - Sequences hard-truncated to 256 labels (Nova tokenizer limit)
 - AT&T regex cleanups: hex→decimal, strip '%', space punctuation

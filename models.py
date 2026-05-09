@@ -214,7 +214,9 @@ class NovaStudentEmbedder(BaseEmbedder):
         all_ids = []
         for s in batch:
             text = self.INSTRUCT_TEMPLATE + s['asm']
-            result = self.tokenizer.encode("", text, "1" * len(text))
+            # Map 0 to the instruction template and 1 to the assembly code
+            char_types = "0" * len(self.INSTRUCT_TEMPLATE) + "1" * len(s['asm'])
+            result = self.tokenizer.encode("", text, char_types)
             all_ids.append(result['input_ids'][:self.max_length])
 
         max_len = max(len(x) for x in all_ids)
