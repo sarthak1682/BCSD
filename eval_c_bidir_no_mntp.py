@@ -41,21 +41,31 @@ class AttentionPooling(torch.nn.Module):
         )
 
     def forward(self, hidden_states, label_positions):
-        pooled_outputs = []
+        # hidden_states: [B, L, D]
+        B, L, D = hidden_states.shape
+        device = hidden_states.device
+
+        # [B, L, 1] -> [B, L]
+        attn_scores = self.attention(hidden_states).squeeze(-1)
+
+        mask = torch.zeros((B, L), dtype=torch.bool, device=device)
         for i, pos_list in enumerate(label_positions):
-            valid_pos = [p for p in pos_list if p < hidden_states.shape[1]]
+            valid_pos = [p for p in pos_list if p < L]
+            if valid_pos:
+                mask[i, valid_pos] = True
+            else:
+                # Fallback: pool over the whole sequence
+                mask[i, :] = True
 
-            if not valid_pos:
-                pooled_outputs.append(hidden_states[i].mean(dim=0))
-                continue
+        # Mask out invalid positions
+        attn_scores = attn_scores.masked_fill(~mask, float('-inf'))
 
-            inst_vectors = hidden_states[i, valid_pos, :]
-            attn_scores = self.attention(inst_vectors)
-            attn_weights = torch.softmax(attn_scores, dim=0)
-            weighted_avg = torch.sum(inst_vectors * attn_weights, dim=0)
-            pooled_outputs.append(weighted_avg)
+        # Softmax over sequence length
+        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1)  # [B, L, 1]
 
-        return torch.stack(pooled_outputs)
+        # Weighted sum: [B, L, D] * [B, L, 1] -> [B, D]
+        pooled_outputs = torch.sum(hidden_states * attn_weights, dim=1)
+        return pooled_outputs
 
 def load_binarycorp_jsonl(path: str):
     data = []
@@ -109,11 +119,19 @@ def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_si
         batch_masks = []
         batch_label_positions = []
 
-        for sample in batch_samples:
-            text = sample["asm"]
-            result = tokenizer.encode("", text, "1" * len(text))
+        INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 
-            ids = result['input_ids'][:1024]
+        for sample in batch_samples:
+            if sample["opt"] == "O0":
+                text = INSTRUCT_TEMPLATE + sample["asm"]
+                char_types = "0" * len(INSTRUCT_TEMPLATE) + "1" * len(sample["asm"])
+            else:
+                text = sample["asm"]
+                char_types = "1" * len(text)
+
+            result = tokenizer.encode("", text, char_types)
+
+            ids = result['input_ids'][:512]
             raw_mask = result['nova_attention_mask']
             L = len(ids)
             mask = np.maximum(raw_mask[:L, :L], raw_mask[:L, :L].T)
@@ -134,7 +152,7 @@ def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_si
             padded_masks[j, :L, :L] = mask
 
         input_ids_t = torch.tensor(padded_ids, dtype=torch.long, device=device)
-        nova_mask_t = torch.tensor(padded_masks, dtype=torch.float32, device=device)
+        nova_mask_t = torch.tensor(padded_masks, dtype=torch.bfloat16, device=device)
 
         outputs = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t, output_hidden_states=True)
         hidden = outputs.hidden_states[-1]
