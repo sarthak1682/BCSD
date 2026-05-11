@@ -31,8 +31,8 @@ NOVA_CACHE_DIR = os.path.expanduser(
     "/snapshots/4b4805bac4f13ef8bec678072ef60609ea3b0e77"
 )
 MODEL_ID           = "lt-asset/nova-1.3b"
-TRAIN_DATA         = "/home/ra72yeq/projects/NovaXLLM2Vec/binarycorp_train.jsonl"
-EVAL_DATA          = "/home/ra72yeq/projects/NovaXLLM2Vec/binarycorp_test.jsonl"
+TRAIN_DATA         = "/home/ra72yeq/projects/NovaXLLM2Vec/binarycorp3m_train_nova.jsonl"
+EVAL_DATA          = "/home/ra72yeq/projects/NovaXLLM2Vec/binarycorp3m_test_nova.jsonl"
 OUTPUT_DIR         = "./model_checkpoints/nova_ebm"
 POOLING_HEAD_FNAME = "pooling_head.pt"
 
@@ -52,7 +52,7 @@ DORA_CFG = dict(
 CFG = dict(
     seed           = 42,
     gpu_id         = 1,
-    max_length     = 512,
+    max_length     = 1024,
     max_grad_norm  = 1.0,
     warmup_ratio   = 0.03,
     log_interval   = 100,
@@ -64,7 +64,7 @@ CFG = dict(
     mask_prob      = 0.15,
     # Stage 3
     s3_epochs      = 1,    s3_batch = 16,  s3_grad_accum = 4,  s3_lr = 3e-5,
-    temperature    = 0.05, hard_neg_w = 2.0,
+    temperature    = 0.05,
     # Eval
     eval_batch_size = 16,
 )
@@ -227,7 +227,7 @@ class TranslationCollator:
 # Stage 2: MNTP
 
 class MNTPCollator:
-    def __init__(self, nova_tokenizer, mask_id, mask_prob=0.15, max_length=512):
+    def __init__(self, nova_tokenizer, mask_id, mask_prob=0.15, max_length=1024):
         self.nova_tokenizer = nova_tokenizer
         self.base_tokenizer = nova_tokenizer.tokenizer
         self.mask_id        = mask_id
@@ -350,8 +350,8 @@ class PairCollator:
 
 # Contrastive loss
 
-def contrastive_loss(embeddings, temperature=0.05, hard_negative_weight=2.0):
-    """InfoNCE with Online Hard Negative Mining."""
+def contrastive_loss(embeddings, temperature=0.05):
+    """InfoNCE (Standard)."""
     embeddings  = F.normalize(embeddings, p=2, dim=1)
     sim_matrix  = torch.matmul(embeddings, embeddings.T) / temperature
     batch_size  = embeddings.shape[0]
@@ -381,7 +381,6 @@ def run_generic_train(
     contrastive:     bool                      = False,
     pooling_head:    Optional[AttentionPooling] = None,
     temperature:     float                     = 0.05,
-    hard_neg_weight: float                     = 2.0,
     mntp:            bool                      = False,
 ) -> None:
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -414,8 +413,7 @@ def run_generic_train(
                               output_hidden_states=True)
                 embs = pooling_head(out.hidden_states[-1], lpos)
                 loss = contrastive_loss(embs,
-                                        temperature=temperature,
-                                        hard_negative_weight=hard_neg_weight)
+                                        temperature=temperature)
             else:
                 b = {k: v.to(device) for k, v in batch.items()}
                 if torch.isnan(b["nova_attention_mask"]).any():
@@ -743,8 +741,7 @@ def main() -> None:
                           args.s3_grad_accum, args.max_grad_norm,
                           args.warmup_ratio, args.log_interval, log,
                           contrastive=True, pooling_head=pooling_head,
-                          temperature=args.temperature,
-                          hard_neg_weight=args.hard_neg_w)
+                          temperature=args.temperature)
 
         model   = model.merge_and_unload()
         s3_ckpt = os.path.join(args.output_dir, "s3_final")

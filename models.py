@@ -100,7 +100,7 @@ class BaseEmbedder(ABC):
 
 
 class JTransEmbedder(BaseEmbedder):
-    def __init__(self, model_path: str, device: str = "cuda", batch_size: int = 32, max_length: int = 512):
+    def __init__(self, model_path: str, device: str = "cuda", batch_size: int = 32, max_length: int = 1024):
         super().__init__(device, batch_size)
         self.max_length = max_length
         print(f"Loading JTrans from {model_path}...")
@@ -151,7 +151,7 @@ class JTransEmbedder(BaseEmbedder):
 
 
 class CLAPEmbedder(BaseEmbedder):
-    def __init__(self, model_path: str = "hustcw/clap-asm", device: str = "cuda", batch_size: int = 32, max_length: int = 512):
+    def __init__(self, model_path: str = "hustcw/clap-asm", device: str = "cuda", batch_size: int = 32, max_length: int = 1024):
         super().__init__(device, batch_size)
         self.max_length = max_length
         print(f"Loading CLAP from {model_path}...")
@@ -164,7 +164,7 @@ class CLAPEmbedder(BaseEmbedder):
         formatted_batch = []
         for s in batch:
             asm_list = s['asm'].split('\n') if isinstance(s['asm'], str) else s['asm']
-            # Limit to 512 instructions to save tokenization time
+            # Limit to 1024 instructions to save tokenization time
             asm_list = asm_list[:self.max_length]
             clap_dict = {str(i): inst for i, inst in enumerate(asm_list)}
             formatted_batch.append(clap_dict)
@@ -201,7 +201,7 @@ class CLAPEmbedder(BaseEmbedder):
 class NovaStudentEmbedder(BaseEmbedder):
     INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 
-    def __init__(self, student_model, lal_head, tokenizer, max_length=512, device="cuda", batch_size=32):
+    def __init__(self, student_model, lal_head, tokenizer, max_length=1024, device="cuda", batch_size=32):
         super().__init__(device, batch_size)
         self.student = student_model.to(device)
         self.lal_head = lal_head.to(device)
@@ -213,9 +213,13 @@ class NovaStudentEmbedder(BaseEmbedder):
     def prepare_input(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         all_ids = []
         for s in batch:
-            text = self.INSTRUCT_TEMPLATE + s['asm']
-            # Map 0 to the instruction template and 1 to the assembly code
-            char_types = "0" * len(self.INSTRUCT_TEMPLATE) + "1" * len(s['asm'])
+            if s.get('opt', 'O0') == 'O0':
+                text = self.INSTRUCT_TEMPLATE + s['asm']
+                char_types = "0" * len(self.INSTRUCT_TEMPLATE) + "1" * len(s['asm'])
+            else:
+                text = s['asm']
+                char_types = "1" * len(text)
+            
             result = self.tokenizer.encode("", text, char_types)
             all_ids.append(result['input_ids'][:self.max_length])
 

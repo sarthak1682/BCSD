@@ -27,7 +27,7 @@ set_seed(SEED)
 
 CACHE_DIR = "/home/ra72yeq/.cache/huggingface/hub/models--lt-asset--nova-1.3b/snapshots/4b4805bac4f13ef8bec678072ef60609ea3b0e77"
 ADAPTER_PATH = "/home/ra72yeq/projects/NovaXLLM2Vec/nova_bidir_noMNTP_full_contrastive"
-DATA_PATH = "binarycorp_train.jsonl"
+DATA_PATH = "binarycorp3m_train_nova.jsonl"
 RUN_ID = 10 
 OUTPUT_DIR = f"nova_distilled_student_{RUN_ID}"
 
@@ -36,7 +36,7 @@ GRAD_ACCUM = 4
 LR = 1e-4
 NUM_EPOCHS = 10
 TOTAL_STEPS = None 
-MAX_LENGTH = 512
+MAX_LENGTH = 1024
 STUDENT_LAYERS = 2
 LAMBDA_START = 1.0
 LAMBDA_END = 0.05
@@ -210,7 +210,7 @@ def masked_mse_loss(student_hidden, teacher_hidden, key_padding_mask):
 
 
 class DistillCollator:
-    def __init__(self, nova_tokenizer, max_length=512):
+    def __init__(self, nova_tokenizer, max_length=1024):
         self.nova_tokenizer = nova_tokenizer
         self.max_length = max_length
         self.pad_id = nova_tokenizer.tokenizer.pad_token_id or 0

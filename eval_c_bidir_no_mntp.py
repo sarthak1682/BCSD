@@ -76,7 +76,7 @@ def load_binarycorp_jsonl(path: str):
     return data
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-eval_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp_test_nova.jsonl"))
+eval_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp3m_test_nova.jsonl"))
 
 # Load base model
 base_model = NovaForCausalLM.from_pretrained(
@@ -131,7 +131,7 @@ def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_si
 
             result = tokenizer.encode("", text, char_types)
 
-            ids = result['input_ids'][:512]
+            ids = result['input_ids'][:1024]
             raw_mask = result['nova_attention_mask']
             L = len(ids)
             mask = np.maximum(raw_mask[:L, :L], raw_mask[:L, :L].T)

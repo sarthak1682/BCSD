@@ -125,8 +125,8 @@ def load_binarycorp_jsonl(path: str):
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-train_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp_train_nova.jsonl"))
-eval_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp_test_nova.jsonl"))
+train_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp3m_train_nova.jsonl"))
+eval_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp3m_test_nova.jsonl"))
 
 class PairCollator:
     def __init__(self, nova_tokenizer, max_length=1024):
@@ -176,7 +176,7 @@ class PairCollator:
 
         return {
             "input_ids": torch.tensor(pad_ids),
-            "nova_attention_mask": torch.tensor(pad_masks),
+            "nova_attention_mask": torch.tensor(pad_masks, dtype=torch.bfloat16),
             "label_positions": all_label_positions
         }
 

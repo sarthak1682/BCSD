@@ -9,15 +9,11 @@ class EvaluationEngine:
 
     def _compute_metrics_chunked(
         self, queries: torch.Tensor, candidates: torch.Tensor, 
-        query_ids: List[str], candidate_ids: List[str], 
+        query_ids_int: torch.Tensor, candidate_ids_int: torch.Tensor, 
         k_list: List[int], chunk_size: int = 2048
     ) -> Dict[str, float]:
         Q = queries.shape[0]
-        C = candidates.shape[0]
         max_k = max(k_list)
-        
-        q_ids_np = np.array(query_ids)
-        c_ids_np = np.array(candidate_ids)
 
         total_recall = {k: 0.0 for k in k_list}
         total_mrr = 0.0
@@ -26,14 +22,15 @@ class EvaluationEngine:
 
         ranks = torch.arange(1, max_k + 1, device=self.device).float()
         discounts = torch.log2(ranks + 1)
+        ideal_dcg_table = torch.cumsum(1.0 / discounts, dim=0)
 
         for i in range(0, Q, chunk_size):
             end = min(i + chunk_size, Q)
             q_chunk = queries[i:end].to(self.device)
             sim_matrix = q_chunk @ candidates.T
-            # O0 queries and O3 candidates are disjoint — no self-similarity masking needed
-            target_mask_np = (q_ids_np[i:end, None] == c_ids_np[None, :])
-            target_mask = torch.tensor(target_mask_np, device=self.device)
+            
+            # FAST CUDA INTEGER COMPARISON (No CPU string bottleneck)
+            target_mask = (query_ids_int[i:end, None] == candidate_ids_int[None, :])
             has_target = target_mask.any(dim=1)
             
             sorted_indices = sim_matrix.argsort(dim=1, descending=True)
@@ -47,14 +44,14 @@ class EvaluationEngine:
             mrr = 1.0 / (first_hit_idx.float() + 1.0)
             total_mrr += mrr[has_target].sum().item()
 
+            # VECTORIZED NDCG (No .item() sync blocking)
             num_actual_targets = target_mask.sum(dim=1)
             for k in k_list:
                 dcg = (sorted_targets[:, :k] / discounts[:k]).sum(dim=1)
-                idcg = torch.zeros_like(dcg)
-                for j in range(end - i):
-                    n_targets = min(k, int(num_actual_targets[j].item()))
-                    if n_targets > 0:
-                        idcg[j] = (1.0 / discounts[:n_targets]).sum()
+                
+                valid_counts = num_actual_targets.clamp(max=k, min=1).long()
+                idcg = ideal_dcg_table[valid_counts - 1]
+                idcg[num_actual_targets == 0] = 0.0
                 
                 ndcg = torch.zeros_like(dcg)
                 valid = idcg > 0
@@ -64,7 +61,7 @@ class EvaluationEngine:
             valid_queries += has_target.sum().item()
 
         if int(valid_queries) < Q:
-            print(f"WARNING: {Q - int(valid_queries)}/{Q} queries had no matching candidate — excluded from all metrics. Check your data.")
+            print(f"WARNING: {Q - int(valid_queries)}/{Q} queries had no matching candidate — excluded.")
 
         res = {"MRR": total_mrr / valid_queries if valid_queries > 0 else 0.0}
         for k in k_list:
@@ -73,27 +70,28 @@ class EvaluationEngine:
 
         return res
 
-
-
-
     def evaluate(
         self, results_dict: Dict[str, Any],
-        pool_sizes: List[Union[int, str]] = [50, 100, 200, 500, "global"],
-        k_list: List[int] = [1, 5, 10], num_trials: int = 100
+        pool_sizes: List[Union[int, str]] =[50, 100, 200, 500, "global"],
+        k_list: List[int] =[1, 5, 10], num_trials: int = 100
     ) -> Dict[str, Any]:
 
-        all_embs = results_dict['embeddings'].to(self.device)
+        all_embs = results_dict['embeddings'] # Kept on CPU to prevent VRAM explosion
         all_ids = results_dict['ids']
         all_opts = results_dict['opts']
 
-        o0_indices = [i for i, opt in enumerate(all_opts) if opt == 'O0']
-        o3_indices = [i for i, opt in enumerate(all_opts) if opt == 'O3']
+        # Map string IDs to integer tensors ONCE for fast CUDA masking
+        unique_ids = list(set(all_ids))
+        id_to_int = {fid: idx for idx, fid in enumerate(unique_ids)}
+        all_ids_int = torch.tensor([id_to_int[fid] for fid in all_ids], device=self.device)
+
+        o0_indices =[i for i, opt in enumerate(all_opts) if opt == 'O0']
+        o3_indices =[i for i, opt in enumerate(all_opts) if opt == 'O3']
 
         o0_id_to_idx = {all_ids[i]: i for i in o0_indices}
         o3_id_to_idx = {all_ids[i]: i for i in o3_indices}
 
         paired_ids = list(set(o0_id_to_idx.keys()) & set(o3_id_to_idx.keys()))
-
         metrics_report = {}
 
         for pool_size in pool_sizes:
@@ -101,9 +99,13 @@ class EvaluationEngine:
                 print("Running Global Evaluation (O0 queries vs ALL O3 candidates)...")
                 q_idx = [o0_id_to_idx[fid] for fid in paired_ids]
                 c_idx = o3_indices
+                
+                # Push candidates to GPU only when needed
+                candidates_gpu = all_embs[c_idx].to(self.device)
+                
                 metrics = self._compute_metrics_chunked(
-                    all_embs[q_idx], all_embs[c_idx],
-                    [all_ids[i] for i in q_idx], [all_ids[i] for i in c_idx],
+                    all_embs[q_idx], candidates_gpu,
+                    all_ids_int[q_idx], all_ids_int[c_idx],
                     k_list
                 )
                 metrics_report["Global"] = metrics
@@ -113,24 +115,23 @@ class EvaluationEngine:
             trial_metrics = defaultdict(list)
 
             if len(paired_ids) <= pool_size:
-                sampled_ids = paired_ids
-                q_idx = [o0_id_to_idx[fid] for fid in sampled_ids]
-                c_idx = [o3_id_to_idx[fid] for fid in sampled_ids]
+                q_idx =[o0_id_to_idx[fid] for fid in paired_ids]
+                c_idx =[o3_id_to_idx[fid] for fid in paired_ids]
                 metrics = self._compute_metrics_chunked(
-                    all_embs[q_idx], all_embs[c_idx],
-                    [all_ids[i] for i in q_idx], [all_ids[i] for i in c_idx],
+                    all_embs[q_idx], all_embs[c_idx].to(self.device),
+                    all_ids_int[q_idx], all_ids_int[c_idx],
                     k_list
                 )
                 metrics_report[f"Pool_{pool_size}"] = {k: float(v) for k, v in metrics.items()}
                 continue
 
-            for trial in range(num_trials):
+            for _ in range(num_trials):
                 sampled_ids = np.random.choice(paired_ids, pool_size, replace=False)
                 q_idx = [o0_id_to_idx[fid] for fid in sampled_ids]
                 c_idx = [o3_id_to_idx[fid] for fid in sampled_ids]
                 metrics = self._compute_metrics_chunked(
-                    all_embs[q_idx], all_embs[c_idx],
-                    [all_ids[i] for i in q_idx], [all_ids[i] for i in c_idx],
+                    all_embs[q_idx], all_embs[c_idx].to(self.device),
+                    all_ids_int[q_idx], all_ids_int[c_idx],
                     k_list
                 )
                 for k, v in metrics.items():

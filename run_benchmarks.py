@@ -9,28 +9,40 @@ from models import CLAPEmbedder, JTransEmbedder, NovaStudentEmbedder
 from metrics import EvaluationEngine
 
 class LatentAttentionLayer(nn.Module):
+    """Distills sequence into a single embedding via Perceiver-style cross-attention."""
     def __init__(self, hidden_dim, num_latents=512, num_heads=8):
         super().__init__()
         self.latents = nn.Parameter(torch.randn(num_latents, hidden_dim))
+
+        self.attn_norm = nn.LayerNorm(hidden_dim)
         self.cross_attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+
+        self.mlp_norm = nn.LayerNorm(hidden_dim)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
-        self.layer_norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, hidden_states, key_padding_mask=None):
         batch_size = hidden_states.shape[0]
         latents = self.latents.unsqueeze(0).expand(batch_size, -1, -1)
-        # Q=sequence, K/V=latents — NV-Embed dictionary style
-        attn_output, _ = self.cross_attn(query=hidden_states, key=latents, value=latents)
-        output = self.mlp(self.layer_norm(attn_output))
-        # Masked mean pool over sequence length (exclude padding)
-        if key_padding_mask is not None:
-            mask = (~key_padding_mask).unsqueeze(-1).to(output.dtype)
-            return (output * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        return output.mean(dim=1)
+
+        # Cross-attention with Pre-LN and residual
+        normed_latents = self.attn_norm(latents)
+        attn_output, _ = self.cross_attn(
+            query=normed_latents,
+            key=hidden_states,
+            value=hidden_states,
+            key_padding_mask=key_padding_mask
+        )
+        latents = latents + attn_output  # Residual 1
+
+        # MLP with Pre-LN and residual
+        mlp_out = self.mlp(self.mlp_norm(latents))
+        latents = latents + mlp_out  # Residual 2
+
+        return latents.mean(dim=1)
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):

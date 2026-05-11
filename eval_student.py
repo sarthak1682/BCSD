@@ -42,28 +42,40 @@ nova_tokenizer = NovaTokenizer(base_tokenizer)
 print("Loaded tokenizer")
 # ---- 3) Student + LAL definitions (copy from distill_nova.py) ----
 class LatentAttentionLayer(nn.Module):
+    """Distills sequence into a single embedding via Perceiver-style cross-attention."""
     def __init__(self, hidden_dim, num_latents=512, num_heads=8):
         super().__init__()
         self.latents = nn.Parameter(torch.randn(num_latents, hidden_dim))
+
+        self.attn_norm = nn.LayerNorm(hidden_dim)
         self.cross_attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+
+        self.mlp_norm = nn.LayerNorm(hidden_dim)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
-        self.layer_norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, hidden_states, key_padding_mask=None):
         batch_size = hidden_states.shape[0]
         latents = self.latents.unsqueeze(0).expand(batch_size, -1, -1)
-        # Q=sequence, K/V=latents — NV-Embed dictionary style
-        attn_output, _ = self.cross_attn(query=hidden_states, key=latents, value=latents)
-        output = self.mlp(self.layer_norm(attn_output))
-        # Masked mean pool over sequence length (exclude padding)
-        if key_padding_mask is not None:
-            mask = (~key_padding_mask).unsqueeze(-1).to(output.dtype)
-            return (output * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        return output.mean(dim=1)
+
+        # Cross-attention with Pre-LN and residual
+        normed_latents = self.attn_norm(latents)
+        attn_output, _ = self.cross_attn(
+            query=normed_latents,
+            key=hidden_states,
+            value=hidden_states,
+            key_padding_mask=key_padding_mask
+        )
+        latents = latents + attn_output  # Residual 1
+
+        # MLP with Pre-LN and residual
+        mlp_out = self.mlp(self.mlp_norm(latents))
+        latents = latents + mlp_out  # Residual 2
+
+        return latents.mean(dim=1)
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -140,12 +152,17 @@ def extract_student_embeddings(samples, batch_size=32, max_len=512):
     for i in range(0, len(samples), batch_size):
         batch_idx = (i // batch_size) + 1
         batch = samples[i:i+batch_size]
-        texts = [INSTRUCT_TEMPLATE + s["asm"] for s in batch]
-
         # tokenize
         all_ids_list = []
-        for text in texts:
-            result = nova_tokenizer.encode("", text, "1" * len(text))
+        for s in batch:
+            if s.get('opt', 'O0') == 'O0':
+                text = INSTRUCT_TEMPLATE + s["asm"]
+                char_types = "0" * len(INSTRUCT_TEMPLATE) + "1" * len(s["asm"])
+            else:
+                text = s["asm"]
+                char_types = "1" * len(text)
+                
+            result = nova_tokenizer.encode("", text, char_types)
             ids = result["input_ids"][:max_len]
             all_ids_list.append(ids)
 
@@ -276,7 +293,7 @@ def plot_tsne_pairs(result, num_pairs=20, out_path="tsne.png", seed=42):
     print(f"Saved t-SNE plot to {out_path}")
 
 # ---- 8) Run ----
-results = extract_student_embeddings(test_samples, batch_size=32, max_len=512)
+results = extract_student_embeddings(test_samples, batch_size=32, max_len=1024)
 torch.save(results, RESULTS_PATH)
 print(f"Saved embeddings to {RESULTS_PATH}")
 

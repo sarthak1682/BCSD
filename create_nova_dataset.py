@@ -171,7 +171,7 @@ def extract_and_convert(tar_path, output_jsonl, opts=['O0', 'O3'], limit=None):
     print(f"✓ Wrote {total_samples} samples ({pair_count} pairs) to {output_jsonl}")
 
 # Convert test set
-extract_and_convert(TEST_TAR, "binarycorp_test_nova.jsonl")
+extract_and_convert(TEST_TAR, "binarycorp3m_test_nova.jsonl")
 
 # Convert train set
-extract_and_convert(TRAIN_TAR, "binarycorp_train_nova.jsonl")
+extract_and_convert(TRAIN_TAR, "binarycorp3m_train_nova.jsonl")
