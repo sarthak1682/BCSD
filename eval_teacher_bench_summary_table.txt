@@ -1,0 +1,40 @@
+TEACHER Bench Evaluation Summary
+Source JSON: eval_teacher_bench_metrics.json
+
+-- Pooled Recall --
+Recall@1_Pool50: 0.8878
+Recall@1_Pool100: 0.8503
+Recall@1_Pool200: 0.8088
+Recall@1_Pool500: 0.7299
+
+--- Full Recall (One Target Per Function) ---
+Recall@1: 0.4943
+Recall@5: 0.6835
+Recall@10: 0.7431
+
+Optimization transfer (Recall@1)
+query\target	O0	O1	O2	O3
+O0	0.6140	0.4046	0.3580	0.2815
+O1	0.4476	0.5885	0.5136	0.4444
+O2	0.4080	0.5278	0.5848	0.4619
+O3	0.3675	0.4968	0.5129	0.6318
+
+Compiler transfer (Recall@1)
+query\target	clang	gcc
+clang	0.6163	0.3554
+gcc	0.2905	0.5318
+
+Architecture transfer (Recall@1)
+query\target	x86_64	arm64	mips64	powerpc64
+x86_64	0.6015	0.1752	0.2126	0.0768
+arm64	0.1815	0.7740	0.0220	0.1838
+mips64	0.3080	0.0313	0.7892	0.0512
+powerpc64	0.0875	0.2036	0.0418	0.7651
+
+Variant transfer (Recall@1)
+query\target	none	all	bogus	flattening	substitution
+none	0.5266	0.2750	0.3467	0.2402	0.1273
+all	0.3449	0.6394	0.4666	0.5174	0.1192
+bogus	0.4782	0.5103	0.8915	0.5921	0.2605
+flattening	0.3619	0.6015	0.5990	0.9284	0.1792
+substitution	0.5299	0.3685	0.7759	0.4634	0.9810

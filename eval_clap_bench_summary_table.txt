@@ -1,0 +1,40 @@
+CLAP Bench Evaluation Summary
+Source JSON: eval_clap_bench_full_report.json
+
+-- Pooled Recall --
+Recall@1_Pool50: 0.5932
+Recall@1_Pool100: 0.5380
+Recall@1_Pool200: 0.5004
+Recall@1_Pool500: 0.4396
+
+--- Full Recall (One Target Per Function) ---
+Recall@1: 0.3684
+Recall@5: 0.4612
+Recall@10: 0.4977
+
+Optimization transfer (Recall@1)
+query\target	O0	O1	O2	O3
+O0	0.5672	0.2415	0.2174	0.1583
+O1	0.2887	0.4772	0.3590	0.2751
+O2	0.2584	0.3609	0.4830	0.3046
+O3	0.2388	0.3295	0.3638	0.5438
+
+Compiler transfer (Recall@1)
+query\target	clang	gcc
+clang	0.4560	0.2489
+gcc	0.1504	0.3952
+
+Architecture transfer (Recall@1)
+query\target	x86_64	arm64	mips64	powerpc64
+x86_64	0.4798	0.0321	0.0304	0.0084
+arm64	0.0306	0.6184	0.0030	0.0140
+mips64	0.0269	0.0038	0.5447	0.0074
+powerpc64	0.0046	0.0123	0.0028	0.5704
+
+Variant transfer (Recall@1)
+query\target	none	all	bogus	flattening	substitution
+none	0.4081	0.1418	0.2046	0.1008	0.0900
+all	0.2297	0.4958	0.3003	0.2425	0.0782
+bogus	0.3779	0.3276	0.8666	0.3099	0.2206
+flattening	0.1898	0.3144	0.3231	0.7012	0.1027
+substitution	0.4748	0.2289	0.6306	0.2232	0.9487
