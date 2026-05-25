@@ -71,7 +71,7 @@ class BaseEmbedder(ABC):
         self.profiler.total_samples += len(batch)
         return F.normalize(embeddings, p=2, dim=1)
 
-    def run_inference(self, dataset: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def run_inference(self, dataset: List[Dict[str, Any]], progress_every: int = 10) -> Dict[str, Any]:
         if self.model is not None:
             self.model.eval()
             
@@ -84,12 +84,29 @@ class BaseEmbedder(ABC):
             self.profiler.total_time_ms = 0.0
             self.profiler.total_samples = 0
 
-        for i in range(0, len(dataset), self.batch_size):
+        total_samples = len(dataset)
+        total_batches = (total_samples + self.batch_size - 1) // self.batch_size
+        start_time = time.time()
+
+        for batch_idx, i in enumerate(range(0, len(dataset), self.batch_size), start=1):
             batch = dataset[i:i + self.batch_size]
             embs = self.encode_batch(batch)
             all_embs.append(embs.cpu())
             all_ids.extend([s['id'] for s in batch])
             all_opts.extend([s.get('opt', 'unknown') for s in batch])
+
+            if progress_every and (batch_idx == 1 or batch_idx % progress_every == 0 or batch_idx == total_batches):
+                processed = min(i + len(batch), total_samples)
+                elapsed = time.time() - start_time
+                samples_per_sec = processed / max(elapsed, 1e-9)
+                remaining = max(total_samples - processed, 0)
+                eta_sec = remaining / max(samples_per_sec, 1e-9)
+                print(
+                    f"Inference progress: {batch_idx}/{total_batches} batches "
+                    f"({processed}/{total_samples} samples, {samples_per_sec:.1f} samples/s, "
+                    f"ETA {eta_sec / 60:.1f} min)",
+                    flush=True
+                )
             
         return {
             "ids": all_ids,
@@ -209,7 +226,7 @@ class NovaStudentEmbedder(BaseEmbedder):
         self.max_length = max_length
         self.pad_id = tokenizer.tokenizer.pad_token_id or 0
         self.model = self.student
-
+    
     def prepare_input(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         all_ids = []
         for s in batch:

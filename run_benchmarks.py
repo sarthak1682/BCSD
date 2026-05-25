@@ -27,8 +27,6 @@ class LatentAttentionLayer(nn.Module):
     def forward(self, hidden_states, key_padding_mask=None):
         batch_size = hidden_states.shape[0]
         latents = self.latents.unsqueeze(0).expand(batch_size, -1, -1)
-
-        # Cross-attention with Pre-LN and residual
         normed_latents = self.attn_norm(latents)
         attn_output, _ = self.cross_attn(
             query=normed_latents,
@@ -36,11 +34,9 @@ class LatentAttentionLayer(nn.Module):
             value=hidden_states,
             key_padding_mask=key_padding_mask
         )
-        latents = latents + attn_output  # Residual 1
-
-        # MLP with Pre-LN and residual
+        latents = latents + attn_output
         mlp_out = self.mlp(self.mlp_norm(latents))
-        latents = latents + mlp_out  # Residual 2
+        latents = latents + mlp_out
 
         return latents.mean(dim=1)
 
@@ -91,6 +87,7 @@ def main():
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--jtrans_path", type=str, default="/home/ra72yeq/projects/Embedding_Paper/jTrans/models/jTrans-finetune")
     parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--progress_every", type=int, default=10, help="Print inference progress every N batches; set to 0 to disable.")
     parser.add_argument("--save_path", type=str, default=None)
     args = parser.parse_args()
 
@@ -142,7 +139,7 @@ def main():
         )
 
     print(f"Running inference (batch_size={args.batch_size})...")
-    results = embedder.run_inference(dataset)
+    results = embedder.run_inference(dataset, progress_every=args.progress_every)
 
     if args.save_path:
         torch.save(results, args.save_path)

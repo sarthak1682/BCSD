@@ -1,16 +1,14 @@
 import json
+import math
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import AutoTokenizer
 import sys
 import os
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from datetime import datetime
-from metrics import EvaluationEngine
+import random
+from collections import defaultdict
+from eval_bench import set_seed, load_jsonl, build_eval_pairs, compute_report, print_report_summary
 
 try:
     from sklearn.manifold import TSNE
@@ -19,20 +17,20 @@ except Exception:
     TSNE = None
     HAS_SKLEARN = False
 
-# ---- 1) Paths / config ----
+
 CACHE_DIR = "/home/ra72yeq/.cache/huggingface/hub/models--lt-asset--nova-1.3b/snapshots/4b4805bac4f13ef8bec678072ef60609ea3b0e77"
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-TEST_PATH = os.path.join(PROJECT_DIR, "binarycorp3m_test_nova.jsonl")
+TEST_PATH = os.path.join(PROJECT_DIR, "nvemb", "output_benchset_rebalanced_test_nova.jsonl")
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
-RUN_ID = 10
-STUDENT_DIR = os.path.join(PROJECT_DIR, "nova_distilled_student_new_10")
-RESULTS_PATH = os.path.join(PROJECT_DIR, f"eval_student_results_new_{RUN_ID}.pt")
-TSNE_PATH = os.path.join(PROJECT_DIR, f"eval_student_tsne_nvembed_{RUN_ID}.png")
+RUN_ID = 20
+STUDENT_DIR = os.path.join(PROJECT_DIR, "nova_distilled_student_20_bench")
+RESULTS_PATH = os.path.join(PROJECT_DIR, f"eval_student_bench_results_{RUN_ID}.pt")
+TSNE_PATH = os.path.join(PROJECT_DIR, f"eval_student_bench_tsne_{RUN_ID}.png")
 TSNE_NUM_PAIRS = 40
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ---- 2) Load tokenizer ----
+
 sys.path.insert(0, CACHE_DIR)
 from modeling_nova import NovaTokenizer  # re-use your local NovaTokenizer
 
@@ -41,7 +39,7 @@ base_tokenizer.add_special_tokens({'additional_special_tokens': ['[MASK]']})
 nova_tokenizer = NovaTokenizer(base_tokenizer)
 
 print("Loaded tokenizer")
-# ---- 3) Student + LAL definitions (copy from distill_nova.py) ----
+
 class LatentAttentionLayer(nn.Module):
     """Distills sequence into a single embedding via Perceiver-style cross-attention."""
     def __init__(self, hidden_dim, num_latents=512, num_heads=8):
@@ -61,8 +59,6 @@ class LatentAttentionLayer(nn.Module):
     def forward(self, hidden_states, key_padding_mask=None):
         batch_size = hidden_states.shape[0]
         latents = self.latents.unsqueeze(0).expand(batch_size, -1, -1)
-
-        # Cross-attention with Pre-LN and residual
         normed_latents = self.attn_norm(latents)
         attn_output, _ = self.cross_attn(
             query=normed_latents,
@@ -70,11 +66,9 @@ class LatentAttentionLayer(nn.Module):
             value=hidden_states,
             key_padding_mask=key_padding_mask
         )
-        latents = latents + attn_output  # Residual 1
-
-        # MLP with Pre-LN and residual
+        latents = latents + attn_output
         mlp_out = self.mlp(self.mlp_norm(latents))
-        latents = latents + mlp_out  # Residual 2
+        latents = latents + mlp_out
 
         return latents.mean(dim=1)
 
@@ -91,7 +85,7 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         return x + self.pe[:, :x.size(1), :].to(x.device)
 
-import math
+
 class StudentDistillationModule(nn.Module):
     def __init__(self, vocab_size, hidden_dim, num_layers=2, pad_id=0):
         super().__init__()
@@ -102,7 +96,7 @@ class StudentDistillationModule(nn.Module):
             d_model=hidden_dim, nhead=8, dim_feedforward=hidden_dim*4,
             dropout=0.1, batch_first=True, norm_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
         self.out_proj = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(self, input_ids, key_padding_mask=None):
@@ -114,7 +108,7 @@ class StudentDistillationModule(nn.Module):
         return self.out_proj(x)
 
 print("Loaded StudentDistillationModule")
-# ---- 4) Load student weights ----
+
 with open(os.path.join(STUDENT_DIR, "student_config.json"), "r") as f:
     cfg = json.load(f)
 print("Loaded cfg")
@@ -134,35 +128,20 @@ lal_head.load_state_dict(torch.load(os.path.join(STUDENT_DIR, "lal_head.pt"), ma
 student.eval()
 lal_head.eval()
 print("Loaded student and lal head")
-# ---- 5) Load test data ----
-def load_binarycorp_jsonl(path):
-    data = []
-    with open(path, "r") as f:
-        for line in f:
-            data.append(json.loads(line))
-    return data
 
-test_samples = load_binarycorp_jsonl(TEST_PATH)
+test_samples = load_jsonl(TEST_PATH)
 print("Loaded test samples")
-# ---- 6) Extract embeddings ----
-@torch.no_grad()
-def extract_student_embeddings(samples, batch_size=32, max_len=512):
-    all_embs, all_ids, all_opts = [], [], []
-    total_batches = (len(samples) + batch_size - 1) // batch_size
 
-    for i in range(0, len(samples), batch_size):
+@torch.no_grad()
+def encode_student_texts(texts, batch_size=32, max_len=1024):
+    all_embs = []
+    total_batches = (len(texts) + batch_size - 1) // batch_size
+
+    for i in range(0, len(texts), batch_size):
         batch_idx = (i // batch_size) + 1
-        batch = samples[i:i+batch_size]
-        # tokenize
+        batch = texts[i:i+batch_size]
         all_ids_list = []
-        for s in batch:
-            if s.get('opt', 'O0') == 'O0':
-                text = INSTRUCT_TEMPLATE + s["asm"]
-                char_types = "0" * len(INSTRUCT_TEMPLATE) + "1" * len(s["asm"])
-            else:
-                text = s["asm"]
-                char_types = "1" * len(text)
-                
+        for text, char_types in batch:
             result = nova_tokenizer.encode("", text, char_types)
             ids = result["input_ids"][:max_len]
             all_ids_list.append(ids)
@@ -179,82 +158,67 @@ def extract_student_embeddings(samples, batch_size=32, max_len=512):
         emb = lal_head(hidden, key_padding_mask=key_padding_mask)
         all_embs.append(emb.float().cpu())
 
-        all_ids.extend([s["id"] for s in batch])
-        all_opts.extend([s["opt"] for s in batch])
-
         if batch_idx == 1 or batch_idx % 50 == 0 or batch_idx == total_batches:
-            print(f"Processed batch {batch_idx}/{total_batches} ({min(i+batch_size, len(samples))}/{len(samples)} samples)")
+            print(f"Processed batch {batch_idx}/{total_batches} ({min(i+batch_size, len(texts))}/{len(texts)} texts)")
+
+    return torch.cat(all_embs, dim=0)
+
+
+def extract_student_embeddings(pairs, batch_size=32, max_len=1024):
+    query_texts = []
+    target_texts = []
+    all_ids = []
+    query_opts = []
+    target_opts = []
+
+    for pair in pairs:
+        query_asm = pair["query"]["asm"]
+        target_asm = pair["target"]["asm"]
+        query_text = INSTRUCT_TEMPLATE + query_asm
+        query_texts.append((query_text, "0" * len(INSTRUCT_TEMPLATE) + "1" * len(query_asm)))
+        target_texts.append((target_asm, "1" * len(target_asm)))
+        all_ids.append(pair["id"])
+        query_opts.append(pair["query"]["opt"])
+        target_opts.append(pair["target"]["opt"])
+
+    print("Encoding query embeddings...")
+    query_embeddings = encode_student_texts(query_texts, batch_size=batch_size, max_len=max_len)
+    print("Encoding target embeddings...")
+    target_embeddings = encode_student_texts(target_texts, batch_size=batch_size, max_len=max_len)
 
     return {
         "ids": all_ids,
-        "opts": all_opts,
-        "embeddings": torch.cat(all_embs, dim=0)
+        "query_opts": query_opts,
+        "target_opts": target_opts,
+        "query_embeddings": query_embeddings,
+        "target_embeddings": target_embeddings,
     }
 
-# ---- 7) Metrics removed in favor of EvaluationEngine ----
 
-def plot_tsne_pairs(result, num_pairs=20, out_path="tsne.png", seed=42):
-    if not HAS_SKLEARN:
-        print("scikit-learn not available; skipping t-SNE plot.")
-        return
 
-    ids = result["ids"]
-    opts = result["opts"]
-    embs = result["embeddings"].float()
-    embs = F.normalize(embs, p=2, dim=1).cpu().numpy()
 
-    o0_idx = [i for i, o in enumerate(opts) if o == "O0"]
-    o3_idx = [i for i, o in enumerate(opts) if o == "O3"]
-    o0_ids = [ids[i] for i in o0_idx]
-    o3_ids = [ids[i] for i in o3_idx]
+def main():
+    set_seed(42)
 
-    paired_ids = list(set(o0_ids) & set(o3_ids))
-    if not paired_ids:
-        print("No paired O0/O3 ids found; skipping t-SNE plot.")
-        return
+    eval_pairs = build_eval_pairs(test_samples, seed=42)
+    results = extract_student_embeddings(eval_pairs, batch_size=32, max_len=1024)
+    torch.save(results, RESULTS_PATH)
+    print(f"Saved embeddings to {RESULTS_PATH}")
 
-    if len(paired_ids) > num_pairs:
-        rng = np.random.default_rng(seed)
-        paired_ids = rng.choice(paired_ids, num_pairs, replace=False).tolist()
+    #plot_tsne_pairs(results, num_pairs=TSNE_NUM_PAIRS, out_path=TSNE_PATH)
 
-    s_o0_idx = [o0_idx[o0_ids.index(fid)] for fid in paired_ids]
-    s_o3_idx = [o3_idx[o3_ids.index(fid)] for fid in paired_ids]
-    sel_idx = s_o0_idx + s_o3_idx
+    report = compute_report(results)
+    report["source"] = os.path.abspath(RESULTS_PATH)
+    report["model"] = f"nova_student_run{RUN_ID}"
+    report["data"] = os.path.abspath(TEST_PATH)
 
-    tsne = TSNE(n_components=2, init="random", random_state=seed, perplexity=min(30, len(sel_idx) - 1))
-    coords = tsne.fit_transform(embs[sel_idx])
+    metrics_path = os.path.join(PROJECT_DIR, f"eval_student_bench_metrics_{RUN_ID}.json")
+    with open(metrics_path, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"Saved full report to {metrics_path}")
 
-    plt.figure(figsize=(8, 6))
-    for i, fid in enumerate(paired_ids):
-        o0_point = coords[i]
-        o3_point = coords[i + len(paired_ids)]
-        plt.scatter(o0_point[0], o0_point[1], marker="o")
-        plt.scatter(o3_point[0], o3_point[1], marker="x")
-        plt.plot([o0_point[0], o3_point[0]], [o0_point[1], o3_point[1]], linestyle="--", linewidth=0.8)
+    print_report_summary(report)
 
-    plt.title(f"t-SNE of Student Embeddings ({len(paired_ids)} pairs - O0 vs O3)")
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=200)
-    plt.close()
-    print(f"Saved t-SNE plot to {out_path}")
 
-# ---- 8) Run ----
-results = extract_student_embeddings(test_samples, batch_size=32, max_len=1024)
-torch.save(results, RESULTS_PATH)
-print(f"Saved embeddings to {RESULTS_PATH}")
-
-#plot_tsne_pairs(results, num_pairs=TSNE_NUM_PAIRS, out_path=TSNE_PATH)
-
-engine = EvaluationEngine(device=device)
-report = engine.evaluate(
-    results_dict=results,
-    pool_sizes=[50, 100, 200, 500, "global"],
-    k_list=[1, 5, 10],
-    num_trials=100
-)
-
-for pool, metrics in report.items():
-    print(f"\n[{pool}]")
-    print(f"NDCG@10:  {metrics['NDCG@10']:.4f}")
-    print(f"Recall@1: {metrics['Recall@1']:.4f}")
-    print(f"MRR:      {metrics['MRR']:.4f}")
+if __name__ == "__main__":
+    main()

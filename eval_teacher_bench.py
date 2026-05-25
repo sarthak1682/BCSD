@@ -3,23 +3,19 @@ import torch
 import numpy as np
 import json
 import gc
+import torch.nn.functional as F
+from collections import defaultdict
 from transformers import AutoTokenizer
 from peft import PeftModel
 import sys
 import random
-from metrics import EvaluationEngine
+from eval_bench import set_seed, load_jsonl, build_eval_pairs, compute_report, print_report_summary
 
 MODEL_ID = "lt-asset/nova-1.3b"
-
-def set_seed(seed=42):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    print(f"Seed set to {seed}.")
+OPT_LEVELS = ("O0", "O1", "O2", "O3")
+COMPILERS = ("clang", "gcc")
+ARCHITECTURES = ("x86_64", "arm64", "mips64", "powerpc64")
+VARIANTS = ("none", "all", "bogus", "flattening", "substitution")
 
 set_seed(42)
 
@@ -46,7 +42,6 @@ class AttentionPooling(torch.nn.Module):
         B, L, D = hidden_states.shape
         device = hidden_states.device
 
-        # [B, L, 1] -> [B, L]
         attn_scores = self.attention(hidden_states).squeeze(-1)
 
         mask = torch.zeros((B, L), dtype=torch.bool, device=device)
@@ -55,29 +50,18 @@ class AttentionPooling(torch.nn.Module):
             if valid_pos:
                 mask[i, valid_pos] = True
             else:
-                # Fallback: pool over the whole sequence
                 mask[i, :] = True
 
-        # Mask out invalid positions
         attn_scores = attn_scores.masked_fill(~mask, float('-inf'))
 
-        # Softmax over sequence length
-        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1)  # [B, L, 1]
+        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1)
 
-        # Weighted sum: [B, L, D] * [B, L, 1] -> [B, D]
         pooled_outputs = torch.sum(hidden_states * attn_weights, dim=1)
         return pooled_outputs
 
-def load_binarycorp_jsonl(path: str):
-    data = []
-    with open(path, 'r') as f:
-        for line in f:
-            data.append(json.loads(line))
-    print(f"Loaded {len(data)} samples from {path}")
-    return data
-
 script_dir = os.path.dirname(os.path.abspath(__file__))
-eval_samples = load_binarycorp_jsonl(os.path.join(script_dir, "binarycorp3m_test_nova.jsonl"))
+BENCH_TEST_PATH = os.path.join(script_dir, "nvemb", "output_benchset_rebalanced_test_nova.jsonl")
+eval_samples = load_jsonl(BENCH_TEST_PATH)
 
 # Load base model
 base_model = NovaForCausalLM.from_pretrained(
@@ -88,7 +72,7 @@ base_model = NovaForCausalLM.from_pretrained(
 base_model.resize_token_embeddings(len(base_tokenizer))
 
 # Load LoRA adapter
-output_dir = os.path.join(script_dir, "nova_contrastive_bidir_noMNTP_final")
+output_dir = os.path.join(script_dir, "nova_contrastive_bidir_noMNTP_bench")
 model = PeftModel.from_pretrained(base_model, output_dir)
 model.eval()
 
@@ -99,8 +83,9 @@ pooling_head = AttentionPooling(model.config.hidden_size).to(device).to(torch.bf
 pooling_head.load_state_dict(torch.load(os.path.join(output_dir, "pooling_head.pt")))
 pooling_head.eval()
 
+
 @torch.no_grad()
-def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_size=16, device="cuda"):
+def encode_texts(model, tokenizer, pooling_module, texts, batch_size=32, device="cuda"):
     model.eval()
     pooling_module.eval()
 
@@ -108,30 +93,16 @@ def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_si
     base_tokenizer = tokenizer.tokenizer
 
     all_embeddings = []
-    all_ids = []
-    all_opts = []
 
-    print("extracting embeddings...")
-
-    for i in range(0, len(samples), batch_size):
-        batch_samples = samples[i:i+batch_size]
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i+batch_size]
 
         batch_input_ids = []
         batch_masks = []
         batch_label_positions = []
 
-        INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
-
-        for sample in batch_samples:
-            if sample["opt"] == "O0":
-                text = INSTRUCT_TEMPLATE + sample["asm"]
-                char_types = "0" * len(INSTRUCT_TEMPLATE) + "1" * len(sample["asm"])
-            else:
-                text = sample["asm"]
-                char_types = "1" * len(text)
-
+        for text, char_types in batch_texts:
             result = tokenizer.encode("", text, char_types)
-
             ids = result['input_ids'][:1024]
             raw_mask = result['nova_attention_mask']
             L = len(ids)
@@ -144,8 +115,8 @@ def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_si
 
         max_len = max(len(x) for x in batch_input_ids)
         pad_id = base_tokenizer.pad_token_id or 0
-        padded_ids = np.full((len(batch_samples), max_len), pad_id, dtype=np.int64)
-        padded_masks = np.zeros((len(batch_samples), max_len, max_len), dtype=np.float32)
+        padded_ids = np.full((len(batch_texts), max_len), pad_id, dtype=np.int64)
+        padded_masks = np.zeros((len(batch_texts), max_len, max_len), dtype=np.float32)
 
         for j, (ids, mask) in enumerate(zip(batch_input_ids, batch_masks)):
             L = len(ids)
@@ -157,46 +128,77 @@ def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_si
 
         outputs = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t, output_hidden_states=True)
         hidden = outputs.hidden_states[-1]
+        del outputs
 
         pooled = pooling_module(hidden, batch_label_positions)
         all_embeddings.append(pooled.cpu())
 
-        all_ids.extend([s["id"] for s in batch_samples])
-        all_opts.extend([s["opt"] for s in batch_samples])
-
         if i % 500 == 0:
-            print(f"Extracted {i}/{len(samples)}")
+            print(f"Encoded {i}/{len(texts)}")
 
-    embeddings_tensor = torch.cat(all_embeddings, dim=0)
-    return {"ids": all_ids, "opts": all_opts, "embeddings": embeddings_tensor}
-
-
-# Evaluation metrics removed in favor of EvaluationEngine
+    return torch.cat(all_embeddings, dim=0)
 
 
-eval_result = extract_embeddings_smart(
-    model=model,
-    tokenizer=nova_tokenizer,
-    pooling_module=pooling_head,
-    samples=eval_samples,
-    batch_size=16,
-    device=device
-)
+def extract_bench_eval_embeddings(model, tokenizer, pooling_module, pairs, batch_size=32, device="cuda"):
+    instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
+    query_texts = []
+    target_texts = []
+    ids = []
+    query_opts = []
+    target_opts = []
 
-save_name = os.path.join(script_dir, "embeddings_bidir_contrastive_noMNTP_test.pt")
-torch.save(eval_result, save_name)
-print(f"embeddings shape: {eval_result['embeddings'].shape}")
+    for pair in pairs:
+        query_asm = pair["query"]["asm"]
+        target_asm = pair["target"]["asm"]
+        query_text = instruct_template + query_asm
+        query_texts.append((query_text, "0" * len(instruct_template) + "1" * len(query_asm)))
+        target_texts.append((target_asm, "1" * len(target_asm)))
+        ids.append(pair["id"])
+        query_opts.append(pair["query"]["opt"])
+        target_opts.append(pair["target"]["opt"])
 
-engine = EvaluationEngine(device=device)
-report = engine.evaluate(
-    results_dict=eval_result,
-    pool_sizes=[50, 100, 200, 500, "global"],
-    k_list=[1, 5, 10],
-    num_trials=100
-)
+    print("Encoding query embeddings...")
+    query_embeddings = encode_texts(model, tokenizer, pooling_module, query_texts, batch_size=batch_size, device=device)
+    print("Encoding target embeddings...")
+    target_embeddings = encode_texts(model, tokenizer, pooling_module, target_texts, batch_size=batch_size, device=device)
 
-for pool, metrics in report.items():
-    print(f"\n[{pool}]")
-    print(f"NDCG@10:  {metrics['NDCG@10']:.4f}")
-    print(f"Recall@1: {metrics['Recall@1']:.4f}")
-    print(f"MRR:      {metrics['MRR']:.4f}")
+    return {
+        "ids": ids,
+        "query_opts": query_opts,
+        "target_opts": target_opts,
+        "query_embeddings": query_embeddings,
+        "target_embeddings": target_embeddings,
+    }
+
+
+def main():
+    eval_pairs = build_eval_pairs(eval_samples, seed=42)
+    eval_result = extract_bench_eval_embeddings(
+        model=model,
+        tokenizer=nova_tokenizer,
+        pooling_module=pooling_head,
+        pairs=eval_pairs,
+        batch_size=16,
+        device=device
+    )
+
+    save_name = os.path.join(script_dir, "embeddings_teacher_bench.pt")
+    torch.save(eval_result, save_name)
+    print(f"query embeddings shape: {eval_result['query_embeddings'].shape}")
+    print(f"target embeddings shape: {eval_result['target_embeddings'].shape}")
+
+    report = compute_report(eval_result)
+    report["source"] = os.path.abspath(save_name)
+    report["model"] = "nova_teacher"
+    report["data"] = os.path.abspath(BENCH_TEST_PATH)
+
+    metrics_path = os.path.join(script_dir, "eval_teacher_bench_metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"Saved full report to {metrics_path}")
+
+    print_report_summary(report)
+
+
+if __name__ == "__main__":
+    main()

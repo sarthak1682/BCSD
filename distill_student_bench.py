@@ -11,11 +11,12 @@ import sys
 import os
 import random
 import json
+from collections import defaultdict
 from tqdm import tqdm
 import gc
 from datetime import datetime
 import math
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 SEED = 42
 def set_seed(seed=42):
     random.seed(seed)
@@ -25,21 +26,23 @@ def set_seed(seed=42):
 
 set_seed(SEED)
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = "/home/ra72yeq/.cache/huggingface/hub/models--lt-asset--nova-1.3b/snapshots/4b4805bac4f13ef8bec678072ef60609ea3b0e77"
-ADAPTER_PATH = "/home/ra72yeq/projects/NovaXLLM2Vec/nova_contrastive_bidir_noMNTP_final"
-DATA_PATH = "binarycorp3m_train_nova.jsonl"
-RUN_ID = 20 
-OUTPUT_DIR = f"nova_distilled_student_{RUN_ID}"
+ADAPTER_PATH = os.path.join(SCRIPT_DIR, "nova_contrastive_bidir_noMNTP_bench")
+DATA_PATH = os.path.join(SCRIPT_DIR, "nvemb", "output_benchset_rebalanced_train_nova.jsonl")
+RUN_ID = 20
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, f"nova_distilled_student_{RUN_ID}_bench")
+RESUME_FROM_CHECKPOINT = False
 RESUME_DIR = "/home/ra72yeq/projects/NovaXLLM2Vec/nova_distilled_student_10"
 
 BATCH_SIZE = 32
-GRAD_ACCUM = 4
+GRAD_ACCUM = 8
 LR = 1e-4
-NUM_EPOCHS = 10
+NUM_EPOCHS = 20
 TOTAL_STEPS = None 
 MAX_LENGTH = 1024
 STUDENT_LAYERS = 2
-LAMBDA_START = 1.0
+LAMBDA_START = 0.05 if RESUME_FROM_CHECKPOINT else 1.0
 LAMBDA_END = 0.05
 VAL_SPLIT = 0.1
 EARLY_STOP_PATIENCE = 3
@@ -58,29 +61,75 @@ def load_binarycorp_jsonl(path: str):
             data.append(json.loads(line))
     return data
 
+
 print("Loading Data...")
 train_samples = load_binarycorp_jsonl(DATA_PATH)
 
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 
-pairs = []
-o0_dict = {s['id']: s for s in train_samples if s['opt'] == 'O0'}
-o3_dict = {s['id']: s for s in train_samples if s['opt'] == 'O3'}
+def parse_bench_opt(opt):
+    parts = opt.split("_")
+    if len(parts) < 4:
+        raise ValueError(f"Unexpected bench opt label: {opt}")
+    compiler = parts[0]
+    optimization = parts[1]
+    variant = parts[-1]
+    architecture = "_".join(parts[2:-1])
+    return compiler, optimization, architecture, variant
 
-str_to_int_map = {fid: i for i, fid in enumerate(o0_dict.keys())}
-for func_id in o0_dict:
-    if func_id in o3_dict:
-        text_query = INSTRUCT_TEMPLATE + o0_dict[func_id]['asm']
-        text_pos = o3_dict[func_id]['asm']
-        pairs.append((text_query, text_pos, str_to_int_map[func_id]))
 
-print(f"Loaded {len(pairs)} instructed pairs for distillation.")
+def group_bench_samples(samples):
+    grouped = defaultdict(list)
+    for sample in samples:
+        parse_bench_opt(sample["opt"])
+        grouped[sample["id"]].append(sample)
+    return grouped
 
-random.shuffle(pairs)
-val_size = max(1, int(len(pairs) * VAL_SPLIT)) if len(pairs) > 1 else 0
-val_pairs = pairs[:val_size]
-train_pairs = pairs[val_size:]
-print(f"Train pairs: {len(train_pairs)} | Val pairs: {len(val_pairs)}")
+
+def build_bench_pairs(grouped, func_ids, func_id_to_int, seed=42):
+    rng = random.Random(seed)
+    pairs = []
+    skipped = 0
+
+    for fid in func_ids:
+        variants = grouped[fid]
+        if len(variants) < 2:
+            skipped += 1
+            continue
+
+        shuffled = variants[:]
+        rng.shuffle(shuffled)
+        func_int = func_id_to_int[fid]
+
+        # Use each variant once as a query, paired with another same-function variant.
+        for idx, query in enumerate(shuffled):
+            positive = shuffled[(idx + 1) % len(shuffled)]
+            pairs.append((query["asm"], positive["asm"], func_int))
+
+    rng.shuffle(pairs)
+    print(f"Built {len(pairs)} pairs from {len(func_ids)} functions ({skipped} skipped with <2 variants).")
+    return pairs
+
+
+grouped_samples = group_bench_samples(train_samples)
+valid_func_ids = [fid for fid, variants in grouped_samples.items() if len(variants) >= 2]
+random.shuffle(valid_func_ids)
+
+val_func_count = max(1, int(len(valid_func_ids) * VAL_SPLIT)) if len(valid_func_ids) > 1 else 0
+val_func_ids = valid_func_ids[:val_func_count]
+train_func_ids = valid_func_ids[val_func_count:]
+func_id_to_int = {fid: i for i, fid in enumerate(sorted(valid_func_ids))}
+
+train_pairs = build_bench_pairs(grouped_samples, train_func_ids, func_id_to_int, seed=SEED)
+val_pairs = build_bench_pairs(grouped_samples, val_func_ids, func_id_to_int, seed=SEED + 1) if val_func_ids else []
+
+if not train_pairs:
+    raise RuntimeError("No bench train pairs were built; check dataset path and opt/id schema.")
+
+print(
+    f"Train functions: {len(train_func_ids)} | Val functions: {len(val_func_ids)} | "
+    f"Train pairs: {len(train_pairs)} | Val pairs: {len(val_pairs)}"
+)
 
 print("Loading Teacher (Nova)...")
 base_tokenizer = AutoTokenizer.from_pretrained("lt-asset/nova-1.3b", cache_dir=CACHE_DIR)
@@ -127,8 +176,6 @@ class LatentAttentionLayer(nn.Module):
     def forward(self, hidden_states, key_padding_mask=None):
         batch_size = hidden_states.shape[0]
         latents = self.latents.unsqueeze(0).expand(batch_size, -1, -1)
-
-        # Cross-attention with Pre-LN and residual
         normed_latents = self.attn_norm(latents)
         attn_output, _ = self.cross_attn(
             query=normed_latents,
@@ -136,11 +183,9 @@ class LatentAttentionLayer(nn.Module):
             value=hidden_states,
             key_padding_mask=key_padding_mask
         )
-        latents = latents + attn_output  # Residual 1
-
-        # MLP with Pre-LN and residual
+        latents = latents + attn_output
         mlp_out = self.mlp(self.mlp_norm(latents))
-        latents = latents + mlp_out  # Residual 2
+        latents = latents + mlp_out
 
         return latents.mean(dim=1)
 
@@ -174,7 +219,7 @@ class StudentDistillationModule(nn.Module):
             batch_first=True,
             norm_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers, enable_nested_tensor=False)
         self.out_proj = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(self, input_ids, key_padding_mask=None):
@@ -197,10 +242,12 @@ student_model = StudentDistillationModule(
 
 lal_head = LatentAttentionLayer(hidden_dim=HIDDEN_DIM).to(device).to(torch.bfloat16)
 
-if RESUME_DIR:
+if RESUME_FROM_CHECKPOINT:
     print(f"Warm-starting student from {RESUME_DIR}...")
     student_model.load_state_dict(torch.load(os.path.join(RESUME_DIR, "student_model.pt"), map_location="cpu"))
     lal_head.load_state_dict(torch.load(os.path.join(RESUME_DIR, "lal_head.pt"), map_location="cpu"))
+else:
+    print("Training student from scratch.")
 
 def count_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -225,13 +272,12 @@ class DistillCollator:
     def __call__(self, batch):
         flat_texts = []
         func_ids =[]
+        instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
         for (q, p, fid) in batch:
-            flat_texts.extend([q, p])
+            flat_texts.extend([instruct_template + q, p])
             func_ids.extend([fid, fid])
 
         all_ids, all_masks = [],[]
-
-        instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
         for text in flat_texts:
             if text.startswith(instruct_template):
                 asm_len = len(text) - len(instruct_template)
@@ -263,10 +309,8 @@ class DistillCollator:
             "input_ids": torch.tensor(pad_ids),
             "nova_attention_mask": torch.tensor(pad_masks, dtype=torch.bfloat16),
             "key_padding_mask": torch.tensor(key_padding_mask),
-            "func_ids": func_ids
+            "func_ids": torch.tensor(func_ids, dtype=torch.long)
         }
-
-
 def contrastive_loss_positive_aware(embeddings, func_ids, temperature=0.05):
     embeddings = F.normalize(embeddings, p=2, dim=1)
     sim_matrix = torch.matmul(embeddings, embeddings.T) / temperature
@@ -275,21 +319,9 @@ def contrastive_loss_positive_aware(embeddings, func_ids, temperature=0.05):
     labels = torch.arange(batch_size, device=embeddings.device)
     labels[::2] += 1
     labels[1::2] -= 1
-    
-    mask_ignore = torch.eye(batch_size, device=embeddings.device).bool()
-    
-    unique_ids = list(set(func_ids))
-    id_map = {uid: i for i, uid in enumerate(unique_ids)}
-    batch_numeric_ids = [id_map[fid] for fid in func_ids]
-    
-    ids_tensor = torch.tensor(batch_numeric_ids, device=embeddings.device).unsqueeze(1)
-    id_match_matrix = (ids_tensor == ids_tensor.T)
-    
-    # Mask out self AND same-function pairs (false negatives)
-    mask_ignore = mask_ignore | id_match_matrix
+    id_match_matrix = func_ids.unsqueeze(1) == func_ids.unsqueeze(0)
+    mask_ignore = torch.eye(batch_size, device=embeddings.device).bool() | id_match_matrix
     sim_matrix.masked_fill_(mask_ignore, -1e9)
-    
-    # Restore the true positive scores that were wiped by the id_match_matrix mask
     mask_pos = torch.zeros_like(sim_matrix, dtype=torch.bool)
     mask_pos.scatter_(1, labels.unsqueeze(1), True)
     pos_scores = (embeddings * embeddings[labels]).sum(dim=1) / temperature
@@ -301,8 +333,8 @@ mse_loss_fn = nn.MSELoss()
 
 
 pair_collator = DistillCollator(nova_tokenizer, max_length=MAX_LENGTH)
-pair_loader = DataLoader(train_pairs, batch_size=BATCH_SIZE, shuffle=True, collate_fn=pair_collator)
-val_loader = DataLoader(val_pairs, batch_size=BATCH_SIZE, shuffle=False, collate_fn=pair_collator) if val_pairs else None
+pair_loader = DataLoader(train_pairs, batch_size=BATCH_SIZE, shuffle=True, collate_fn=pair_collator, num_workers=4, pin_memory=True)
+val_loader = DataLoader(val_pairs, batch_size=BATCH_SIZE, shuffle=False, collate_fn=pair_collator, num_workers=4, pin_memory=True) if val_pairs else None
 
 TOTAL_STEPS = math.ceil(len(pair_loader) / GRAD_ACCUM) * NUM_EPOCHS
 
@@ -321,7 +353,7 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
         for batch in data_loader:
             input_ids = batch['input_ids'].to(device)
             nova_mask = batch['nova_attention_mask'].to(device)
-            func_ids = batch['func_ids']
+            func_ids = batch['func_ids'].to(device)
             key_padding_mask = batch['key_padding_mask'].to(device)
 
             teacher_out = teacher_model(
@@ -329,7 +361,9 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
                 nova_attention_mask=nova_mask,
                 output_hidden_states=True
             )
-            h_teacher = teacher_out.hidden_states[-1]
+            h_teacher = teacher_out.hidden_states[-1].detach()
+            del teacher_out
+            
             h_student = student_model(input_ids, key_padding_mask=key_padding_mask)
 
             loss_distill = masked_mse_loss(h_student, h_teacher.detach(), key_padding_mask)
@@ -339,6 +373,9 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
             loss_total = loss_contrastive + (LAMBDA_END * loss_distill)
             total += loss_total.item()
             steps += 1
+
+            del h_teacher, h_student, embeddings, loss_contrastive, loss_distill, loss_total
+            del input_ids, nova_mask, key_padding_mask
     student_model.train()
     lal_head.train()
     return total / max(1, steps)
@@ -363,7 +400,7 @@ for epoch in range(NUM_EPOCHS):
         
         input_ids = batch['input_ids'].to(device)
         nova_mask = batch['nova_attention_mask'].to(device)
-        func_ids = batch['func_ids']
+        func_ids = batch['func_ids'].to(device)
         
         with torch.no_grad():
             teacher_out = teacher_model(
@@ -371,7 +408,8 @@ for epoch in range(NUM_EPOCHS):
                 nova_attention_mask=nova_mask,
                 output_hidden_states=True
             )
-            h_teacher = teacher_out.hidden_states[-1]
+            h_teacher = teacher_out.hidden_states[-1].detach()
+            del teacher_out
             
         key_padding_mask = batch['key_padding_mask'].to(device)
         h_student = student_model(input_ids, key_padding_mask=key_padding_mask)
@@ -389,7 +427,6 @@ for epoch in range(NUM_EPOCHS):
             h_selected = h_teacher.detach()
         else:
             h_selected = h_student
-            
         embeddings = lal_head(h_selected, key_padding_mask=key_padding_mask)
         loss_contrastive = contrastive_loss_positive_aware(embeddings, func_ids)
         
@@ -419,10 +456,13 @@ for epoch in range(NUM_EPOCHS):
                     f"Loss={avg_total:.4f} (Cont={avg_contrastive:.3f}, Dist={avg_distill:.3f}, "
                     f"lambda={lambda_mse:.3f})"
                 )
-                torch.cuda.empty_cache()
+                #torch.cuda.empty_cache()
             running_total = 0.0
             running_contrastive = 0.0
             running_distill = 0.0
+
+        del h_selected, embeddings, loss_contrastive, loss_distill, loss_total
+        del h_teacher, h_student, input_ids, nova_mask, key_padding_mask
 
         if global_step >= TOTAL_STEPS:
             break
@@ -463,5 +503,3 @@ config = {
 }
 with open(os.path.join(OUTPUT_DIR, "student_config.json"), "w") as f:
     json.dump(config, f)
-
-print("Process finished successfully.")

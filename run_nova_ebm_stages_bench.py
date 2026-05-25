@@ -1,9 +1,9 @@
-"""Training script for Nova EBM stages 1-3 and evaluation.
+"""Training script for Nova EBM stages 1-3 and evaluation (bench dataset).
 
 Examples:
-  python run_nova_ebm_stages.py --stages 1,2,3
-  python run_nova_ebm_stages.py --stages 2,3 --s1_ckpt ./ckpts/s1_final
-  python run_nova_ebm_stages.py --stages eval --s3_ckpt ./ckpts/s3_final
+  python run_nova_ebm_stages_bench.py --stages 1,2,3
+  python run_nova_ebm_stages_bench.py --stages 2,3 --s1_ckpt ./ckpts/s1_final
+  python run_nova_ebm_stages_bench.py --stages eval --s3_ckpt ./ckpts/s3_final
 """
 
 import argparse
@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 sys.path.insert(0, "/home/ra72yeq/projects/BCSD")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from metrics import EvaluationEngine
+from eval_bench import build_eval_pairs, compute_report, print_report_summary
 
 import numpy as np
 import torch
@@ -37,9 +37,9 @@ NOVA_CACHE_DIR = os.path.expanduser(
     "/snapshots/4b4805bac4f13ef8bec678072ef60609ea3b0e77"
 )
 MODEL_ID           = "lt-asset/nova-1.3b"
-TRAIN_DATA         = "/home/ra72yeq/projects/NovaXLLM2Vec/binarycorp3m_train_nova.jsonl"
-EVAL_DATA          = "/home/ra72yeq/projects/NovaXLLM2Vec/binarycorp3m_test_nova.jsonl"
-OUTPUT_DIR         = "./model_checkpoints/nova_ebm"
+TRAIN_DATA         = "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_train_nova.jsonl"
+EVAL_DATA          = "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_test_nova.jsonl"
+OUTPUT_DIR         = "./model_checkpoints/nova_ebm_bench"
 POOLING_HEAD_FNAME = "pooling_head.pt"
 
 # DoRA config (matches adapter_config.json in checkpoints)
@@ -108,6 +108,30 @@ def load_binarycorp_jsonl(path: str):
     return data
 
 
+def parse_bench_opt(opt: str) -> Dict[str, str]:
+    parts = opt.split("_")
+    if len(parts) < 4:
+        raise ValueError(f"Unexpected bench opt label: {opt}")
+    return {
+        "compiler": parts[0],
+        "optimization": parts[1],
+        "architecture": "_".join(parts[2:-1]),
+        "variant": parts[-1],
+    }
+
+
+def asm_to_text(asm) -> str:
+    return "\n".join(asm) if isinstance(asm, list) else asm
+
+
+def group_samples_by_id(samples: List[Dict]) -> Dict[str, List[Dict]]:
+    grouped: Dict[str, List[Dict]] = {}
+    for sample in samples:
+        parse_bench_opt(sample["opt"])
+        grouped.setdefault(sample["id"], []).append(sample)
+    return grouped
+
+
 # Padding helper
 
 def _pad_batch(
@@ -155,7 +179,6 @@ class AttentionPooling(torch.nn.Module):
         B, L, D = hidden_states.shape
         device = hidden_states.device
         
-        # [B, L, 1] -> [B, L]
         attn_scores = self.attention(hidden_states).squeeze(-1)
         
         mask = torch.zeros((B, L), dtype=torch.bool, device=device)
@@ -164,16 +187,11 @@ class AttentionPooling(torch.nn.Module):
             if valid_pos:
                 mask[i, valid_pos] = True
             else:
-                # Fallback: if no valid label positions, pool over the whole sequence
                 mask[i, :] = True
-                
-        # Mask out invalid positions
         attn_scores = attn_scores.masked_fill(~mask, float('-inf'))
         
-        # Softmax over sequence length
-        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1) # [B, L, 1]
+        attn_weights = torch.softmax(attn_scores, dim=1).unsqueeze(-1)
         
-        # Weighted sum: [B, L, D] * [B, L, 1] -> [B, D]
         pooled_outputs = torch.sum(hidden_states * attn_weights, dim=1)
         return pooled_outputs
 
@@ -182,16 +200,24 @@ class AttentionPooling(torch.nn.Module):
 
 class CrossOptTranslationDataset(Dataset):
     def __init__(self, samples: List[Dict], bidirectional: bool = True) -> None:
-        o0 = {s["id"]: s["asm"] for s in samples if s["opt"] == "O0"}
-        o3 = {s["id"]: s["asm"] for s in samples if s["opt"] == "O3"}
         self.pairs: List[Tuple[str, str]] = []
-        for fid, asm0 in o0.items():
-            if fid in o3:
-                self.pairs.append((asm0, o3[fid]))
+        grouped = group_samples_by_id(samples)
+        skipped = 0
+        for fid, variants in grouped.items():
+            if len(variants) < 2:
+                skipped += 1
+                continue
+            ordered = variants[:]
+            random.shuffle(ordered)
+            for idx, src in enumerate(ordered):
+                tgt = ordered[(idx + 1) % len(ordered)]
+                src_asm = asm_to_text(src["asm"])
+                tgt_asm = asm_to_text(tgt["asm"])
+                self.pairs.append((src_asm, tgt_asm))
                 if bidirectional:
-                    self.pairs.append((o3[fid], asm0))
+                    self.pairs.append((tgt_asm, src_asm))
         print(f"  {len(self.pairs):,} translation pairs "
-              f"({'bidir' if bidirectional else 'unidir'})")
+              f"({'bidir' if bidirectional else 'unidir'}, {skipped} skipped)")
 
     def __len__(self):  return len(self.pairs)
     def __getitem__(self, i): return self.pairs[i]
@@ -245,7 +271,7 @@ class MNTPCollator:
         all_input_ids, all_labels, all_masks = [], [], []
 
         for item in batch:
-            text       = item["asm"]
+            text       = asm_to_text(item["asm"])
             char_types = "1" * len(text)
             result     = self.nova_tokenizer.encode("", text, char_types)
 
@@ -294,11 +320,22 @@ class MNTPCollator:
 
 class ContrastivePairDataset(Dataset):
     def __init__(self, samples: List[Dict]) -> None:
-        o0 = {s["id"]: s["asm"] for s in samples if s["opt"] == "O0"}
-        o3 = {s["id"]: s["asm"] for s in samples if s["opt"] == "O3"}
-        template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
-        self.pairs = [(template + o0[fid], o3[fid]) for fid in o0 if fid in o3]
+        grouped = group_samples_by_id(samples)
+        func_id_to_int = {fid: i for i, fid in enumerate(sorted(grouped))}
+        self.pairs: List[Tuple[str, str, int]] = []
+        skipped = 0
+        for fid, variants in grouped.items():
+            if len(variants) < 2:
+                skipped += 1
+                continue
+            ordered = variants[:]
+            random.shuffle(ordered)
+            func_int = func_id_to_int[fid]
+            for idx, query in enumerate(ordered):
+                positive = ordered[(idx + 1) % len(ordered)]
+                self.pairs.append((asm_to_text(query["asm"]), asm_to_text(positive["asm"]), func_int))
         print(f"Paired samples: {len(self.pairs)} (Total items: {len(self.pairs) * 2})")
+        print(f"  {skipped} functions skipped with <2 variants")
 
     def __len__(self):  return len(self.pairs)
     def __getitem__(self, i): return self.pairs[i]
@@ -313,12 +350,14 @@ class PairCollator:
 
     def __call__(self, batch):
         flat_texts = []
-        for p in batch:
-            flat_texts.extend([p[0], p[1]])
+        func_ids = []
+        instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
+        for query_asm, positive_asm, func_id in batch:
+            flat_texts.extend([instruct_template + query_asm, positive_asm])
+            func_ids.extend([func_id, func_id])
 
         all_ids, all_masks, all_label_positions = [], [], []
 
-        instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
         for text in flat_texts:
             if text.startswith(instruct_template):
                 asm_len = len(text) - len(instruct_template)
@@ -326,7 +365,6 @@ class PairCollator:
             else:
                 char_types = "1" * len(text)
             result = self.nova_tokenizer.encode("", text, char_types)
-
             ids = result['input_ids'][:self.max_length]
             raw_mask = result['nova_attention_mask']
             L    = len(ids)
@@ -351,30 +389,32 @@ class PairCollator:
             "input_ids":           torch.tensor(pad_ids),
             "nova_attention_mask": torch.tensor(pad_masks, dtype=torch.bfloat16),
             "label_positions":     all_label_positions,
+            "func_ids":            torch.tensor(func_ids, dtype=torch.long),
         }
 
 
 # Contrastive loss
-def cgte_loss(x_emb, y_emb, temperature=0.05):
-    """
-    Exact implementation of Equation 5 from L1NNA/binary_sim
-    """
-    scale = 1 / temperature
-    batch_size = x_emb.size(0)
-    labels = torch.arange(batch_size, device=x_emb.device)
-    
-    xiy = F.cosine_similarity(x_emb.unsqueeze(1), y_emb.unsqueeze(0), dim=2) * scale
-    yix = F.cosine_similarity(y_emb.unsqueeze(1), x_emb.unsqueeze(0), dim=2) * scale
-    yix[labels, labels] = -torch.inf
-    
-    xix = F.cosine_similarity(x_emb.unsqueeze(1), x_emb.unsqueeze(0), dim=2) * scale
-    xix[labels, labels] = -torch.inf
-    
-    yiy = F.cosine_similarity(y_emb.unsqueeze(1), y_emb.unsqueeze(0), dim=2) * scale
-    yiy[labels, labels] = -torch.inf
-    
-    similarities = torch.cat([xiy, yix, xix, yiy], dim=1)
-    return F.cross_entropy(similarities, labels)
+
+
+def contrastive_loss_positive_aware(embeddings, func_ids, temperature=0.05):
+    embeddings = F.normalize(embeddings, p=2, dim=1)
+    sim_matrix = torch.matmul(embeddings, embeddings.T) / temperature
+    batch_size = embeddings.shape[0]
+
+    labels = torch.arange(batch_size, device=embeddings.device)
+    labels[::2] += 1
+    labels[1::2] -= 1
+
+    id_match_matrix = func_ids.unsqueeze(1) == func_ids.unsqueeze(0)
+    mask_ignore = torch.eye(batch_size, device=embeddings.device).bool() | id_match_matrix
+    sim_matrix.masked_fill_(mask_ignore, -1e9)
+
+    mask_pos = torch.zeros_like(sim_matrix, dtype=torch.bool)
+    mask_pos.scatter_(1, labels.unsqueeze(1), True)
+    pos_scores = (embeddings * embeddings[labels]).sum(dim=1) / temperature
+    sim_matrix[mask_pos] = pos_scores
+
+    return F.cross_entropy(sim_matrix, labels)
 
 # Training loop
 
@@ -392,6 +432,7 @@ def run_generic_train(
     pooling_head:    Optional[AttentionPooling] = None,
     temperature:     float                     = 0.05,
     mntp:            bool                      = False,
+    max_steps:       Optional[int]             = None,
 ) -> None:
     trainable = [p for p in model.parameters() if p.requires_grad]
     if pooling_head is not None:
@@ -416,15 +457,18 @@ def run_generic_train(
         skipped = 0
         optimizer.zero_grad()
 
-        # --- ADDED: Buffers for cGTE accumulation ---
+
         accumulated_embs = []
         accumulated_batches = []
 
         for step, batch in enumerate(tqdm(dataloader, desc=f"epoch {epoch + 1}")):
+            if max_steps is not None and step >= max_steps:
+                log_fn(f"  reached max_steps={max_steps}, stopping epoch early")
+                break
             if contrastive:
-                # 1. Forward WITHOUT tracking gradients (saves VRAM)
                 with torch.no_grad():
                     lpos = batch.pop("label_positions")
+                    func_ids = batch.pop("func_ids").to(device)
                     b_dev = {k: v.to(device) for k, v in batch.items()}
                     if torch.isnan(b_dev["nova_attention_mask"]).any():
                         skipped += 1; continue
@@ -432,26 +476,25 @@ def run_generic_train(
                     out = model(**b_dev, output_hidden_states=True)
                     embs = pooling_head(out.hidden_states[-1], lpos)
                     accumulated_embs.append(embs.detach())
-                    accumulated_batches.append((b_dev, lpos))
+                    accumulated_batches.append((b_dev, lpos, func_ids))
                 
-                # 2. Compute global loss and backward when we hit grad_accum
                 if len(accumulated_embs) == grad_accum or (step + 1) == len(dataloader):
                     full_embs = torch.cat(accumulated_embs, dim=0)
                     full_embs.requires_grad_(True)
-                    
-                    # Split flat [O0_1, O3_1, O0_2, O3_2...] into x (queries) and y (keys)
-                    x_emb = full_embs[0::2]
-                    y_emb = full_embs[1::2]
-                    
-                    loss = cgte_loss(x_emb, y_emb, temperature=temperature)
+                    full_func_ids = torch.cat([x[2] for x in accumulated_batches], dim=0)
+
+                    loss = contrastive_loss_positive_aware(
+                        full_embs,
+                        full_func_ids,
+                        temperature=temperature,
+                    )
                     loss.backward()
                     
                     embs_grad = full_embs.grad
                     losses.append(loss.item())
 
-                    # 3. Secondary chunked backward pass
                     chunk_start = 0
-                    for (b_d, l_p) in accumulated_batches:
+                    for (b_d, l_p, _) in accumulated_batches:
                         chunk_size = b_d["input_ids"].shape[0]
                         out = model(**b_d, output_hidden_states=True)
                         chunk_embs = pooling_head(out.hidden_states[-1], l_p)
@@ -472,9 +515,7 @@ def run_generic_train(
                                f"  loss={sum(w)/len(w):.4f}  skipped={skipped}")
 
             else:
-                # -------------------------------------------------------------
-                # ORIGINAL CAUSAL/MNTP LOGIC (Untouched)
-                # -------------------------------------------------------------
+
                 b = {k: v.to(device) for k, v in batch.items()}
                 if torch.isnan(b["nova_attention_mask"]).any():
                     skipped += 1; optimizer.zero_grad(); continue
@@ -513,40 +554,27 @@ def run_generic_train(
 
 # Embedding extraction
 
+
 @torch.no_grad()
-def extract_embeddings(model, pooling_head, nova_tokenizer, samples,
-                        batch_size=16, max_length=1024, device="cuda"):
+def encode_bench_texts(model, pooling_head, nova_tokenizer, texts,
+                       batch_size=16, max_length=1024, device="cuda"):
     model.eval()
     pooling_head.eval()
 
     label_ids      = nova_tokenizer.labels
     base_tokenizer = nova_tokenizer.tokenizer
-
     all_embeddings = []
-    all_ids        = []
-    all_opts       = []
 
-    for i in range(0, len(samples), batch_size):
-        batch_samples = samples[i:i + batch_size]
-
-        batch_input_ids      = []
-        batch_masks          = []
+    for i in range(0, len(texts), batch_size):
+        batch_texts = texts[i:i + batch_size]
+        batch_input_ids       = []
+        batch_masks           = []
         batch_label_positions = []
 
-        INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
-        
-        for sample in batch_samples:
-            if sample["opt"] == "O0":
-                text = INSTRUCT_TEMPLATE + sample["asm"]
-                char_types = "0" * len(INSTRUCT_TEMPLATE) + "1" * len(sample["asm"])
-            else:
-                text = sample["asm"]
-                char_types = "1" * len(text)
-                
+        for text, char_types in batch_texts:
             result = nova_tokenizer.encode("", text, char_types)
-
-            input_ids = result['input_ids'][:max_length]
-            raw_mask  = result['nova_attention_mask']
+            input_ids = result["input_ids"][:max_length]
+            raw_mask  = result["nova_attention_mask"]
             L         = len(input_ids)
             mask      = np.maximum(raw_mask[:L, :L], raw_mask[:L, :L].T)
             label_pos = [j for j, tid in enumerate(input_ids) if tid in label_ids]
@@ -558,33 +586,61 @@ def extract_embeddings(model, pooling_head, nova_tokenizer, samples,
         max_len = max(len(x) for x in batch_input_ids)
         pad_id  = base_tokenizer.pad_token_id or 0
 
-        padded_ids   = np.full((len(batch_samples), max_len), pad_id, dtype=np.int64)
-        padded_masks = np.zeros((len(batch_samples), max_len, max_len), dtype=np.float32)
+        padded_ids   = np.full((len(batch_texts), max_len), pad_id, dtype=np.int64)
+        padded_masks = np.zeros((len(batch_texts), max_len, max_len), dtype=np.float32)
 
         for j, (ids, mask) in enumerate(zip(batch_input_ids, batch_masks)):
             L = len(ids)
             padded_ids[j, :L]       = ids
             padded_masks[j, :L, :L] = mask
 
-        input_ids_t = torch.tensor(padded_ids,   dtype=torch.long,    device=device)
+        input_ids_t = torch.tensor(padded_ids, dtype=torch.long, device=device)
         nova_mask_t = torch.tensor(padded_masks, dtype=torch.bfloat16, device=device)
 
-        outputs      = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t,
-                             output_hidden_states=True)
-        hidden       = outputs.hidden_states[-1]
+        outputs = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t,
+                        output_hidden_states=True)
+        hidden = outputs.hidden_states[-1]
         pooled_batch = pooling_head(hidden, batch_label_positions)
-
-        all_embeddings.append(pooled_batch.cpu())
-        all_ids.extend([s["id"]  for s in batch_samples])
-        all_opts.extend([s["opt"] for s in batch_samples])
+        all_embeddings.append(pooled_batch.float().cpu())
 
         if i % 500 == 0:
-            print(f"Extracted {i + len(batch_samples)}/{len(samples)}")
+            print(f"Encoded {min(i + len(batch_texts), len(texts))}/{len(texts)}")
+
+    return torch.cat(all_embeddings, dim=0)
+
+
+def extract_bench_eval_embeddings(model, pooling_head, nova_tokenizer, pairs,
+                                  batch_size=16, max_length=1024, device="cuda"):
+    instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
+    query_texts = []
+    target_texts = []
+    ids = []
+    query_opts = []
+    target_opts = []
+
+    for pair in pairs:
+        query_asm = asm_to_text(pair["query"]["asm"])
+        target_asm = asm_to_text(pair["target"]["asm"])
+        query_text = instruct_template + query_asm
+        query_texts.append((query_text, "0" * len(instruct_template) + "1" * len(query_asm)))
+        target_texts.append((target_asm, "1" * len(target_asm)))
+        ids.append(pair["id"])
+        query_opts.append(pair["query"]["opt"])
+        target_opts.append(pair["target"]["opt"])
+
+    print("Encoding query embeddings...")
+    query_embeddings = encode_bench_texts(model, pooling_head, nova_tokenizer, query_texts,
+                                          batch_size=batch_size, max_length=max_length, device=device)
+    print("Encoding target embeddings...")
+    target_embeddings = encode_bench_texts(model, pooling_head, nova_tokenizer, target_texts,
+                                           batch_size=batch_size, max_length=max_length, device=device)
 
     return {
-        "ids":        all_ids,
-        "opts":       all_opts,
-        "embeddings": torch.cat(all_embeddings, dim=0),
+        "ids": ids,
+        "query_opts": query_opts,
+        "target_opts": target_opts,
+        "query_embeddings": query_embeddings,
+        "target_embeddings": target_embeddings,
     }
 
 
@@ -598,28 +654,33 @@ def run_eval(model, pooling_head, nova_tokenizer, eval_samples, args, log_fn) ->
     gc.collect(); torch.cuda.empty_cache()
     device = next(model.parameters()).device
 
-    result   = extract_embeddings(model, pooling_head, nova_tokenizer, eval_samples,
-                                   batch_size=args.eval_batch_size,
-                                   max_length=args.max_length,
-                                   device=str(device))
-    emb_path = os.path.join(args.output_dir, "eval_embeddings.pt")
-    torch.save(result, emb_path)
-    log_fn(f"  embeddings {result['embeddings'].shape}  →  {emb_path}")
-
-    log_fn("\nEvaluating with EvaluationEngine...")
-    engine = EvaluationEngine(device=device)
-    report = engine.evaluate(
-        results_dict=result,
-        pool_sizes=[50, 100, 200, 500, "global"],
-        k_list=[1, 5, 10],
-        num_trials=100
+    eval_pairs = build_eval_pairs(eval_samples, seed=args.seed)
+    result = extract_bench_eval_embeddings(
+        model,
+        pooling_head,
+        nova_tokenizer,
+        eval_pairs,
+        batch_size=args.eval_batch_size,
+        max_length=args.max_length,
+        device=str(device),
     )
+    emb_path = os.path.join(args.output_dir, "eval_bench_embeddings.pt")
+    torch.save(result, emb_path)
+    log_fn(f"  query embeddings {result['query_embeddings'].shape}  →  {emb_path}")
+    log_fn(f"  target embeddings {result['target_embeddings'].shape}  →  {emb_path}")
 
-    for pool, metrics in report.items():
-        log_fn(f"\n[{pool}]")
-        log_fn(f"  NDCG@10:  {metrics['NDCG@10']:.4f}")
-        log_fn(f"  Recall@1: {metrics['Recall@1']:.4f}")
-        log_fn(f"  MRR:      {metrics['MRR']:.4f}")
+    log_fn("\nEvaluating with bench metrics...")
+    report = compute_report(result)
+    report["source"] = os.path.abspath(emb_path)
+    report["model"] = "nova_ebm_bench"
+    report["data"] = os.path.abspath(EVAL_DATA)
+
+    report_path = os.path.join(args.output_dir, "eval_bench_report.json")
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+    log_fn(f"  report → {report_path}")
+
+    print_report_summary(report)
 
 
 # Main
@@ -722,7 +783,8 @@ def main() -> None:
         )
         run_generic_train(model, loader, args.s2_epochs, args.s2_lr,
                           args.s2_grad_accum, args.max_grad_norm,
-                          args.warmup_ratio, args.log_interval, log, mntp=True)
+                          args.warmup_ratio, args.log_interval, log, mntp=True,
+                          max_steps=1000)
 
         model   = model.merge_and_unload()
         s2_ckpt = os.path.join(args.output_dir, "s2_final")
