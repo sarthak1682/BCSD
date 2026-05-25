@@ -16,7 +16,7 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
-        return x + self.pe[:, :x.size(1), pe_slice_or_pad_is_not_needed_for_x_device].to(x.device) if hasattr(self, 'pe_slice_or_pad_is_not_needed_for_x_device') else x + self.pe[:, :x.size(1), :].to(x.device)
+        return x + self.pe[:, :x.size(1), :].to(x.device)
 
 
 class StudentDistillationModule(nn.Module):

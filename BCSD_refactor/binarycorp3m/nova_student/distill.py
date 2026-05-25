@@ -104,7 +104,7 @@ if os.path.exists(ADAPTER_PATH):
     print(f"Loading trained adapter from {ADAPTER_PATH}...")
     teacher_model = PeftModel.from_pretrained(teacher_model, ADAPTER_PATH)
     teacher_model = teacher_model.merge_and_unload() 
-} else:
+else:
     print("WARNING: Adapter not found. Using raw Nova as teacher.")
 
 teacher_model.requires_grad_(False)
