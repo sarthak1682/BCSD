@@ -70,14 +70,14 @@ echo -e "  - Destination: ${DATA_DIR}"
 
 if [ ! -f "$TRAIN_FILE" ]; then
     echo -e "  - Downloading rebalanced train dataset..."
-    gdown --id "$TRAIN_ID" -O "$TRAIN_FILE"
+    gdown "$TRAIN_ID" -O "$TRAIN_FILE"
 else
     echo -e "  - Train dataset ${GREEN}already present${NC} (skipping)."
 fi
 
 if [ ! -f "$TEST_FILE" ]; then
     echo -e "  - Downloading rebalanced test dataset..."
-    gdown --id "$TEST_ID" -O "$TEST_FILE"
+    gdown "$TEST_ID" -O "$TEST_FILE"
 else
     echo -e "  - Test dataset ${GREEN}already present${NC} (skipping)."
 fi
