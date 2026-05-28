@@ -23,8 +23,8 @@
 torch
 
 # --- HuggingFace stack ---
-transformers>=4.40.0        # NovaForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
-peft>=0.10.0                # LoraConfig, get_peft_model, PeftModel, DoRA support
+transformers==4.40.2        # Nova's modeling_nova.py requires v4.40.2 to match _update_causal_mask signature
+peft==0.10.0                # DoRA support added in 0.10.0; >=0.12 has torch.distributed.tensor bug
 accelerate>=0.28.0          # Required internally by peft + transformers for device_map
 
 # --- Numerics ---
@@ -41,3 +41,6 @@ matplotlib>=3.7.0
 
 # --- Dataset download ---
 gdown>=4.7.3                # download_dataset.py; auto-installed by the script if missing
+
+# --- Remote monitoring (recommended) ---
+wandb                       # Web dashboard to monitor training from anywhere without SSH

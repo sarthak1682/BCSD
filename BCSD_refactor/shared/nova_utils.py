@@ -13,10 +13,25 @@ import torch
 from transformers import AutoTokenizer
 
 
-NOVA_CACHE_DIR = os.path.expanduser(
-    "~/.cache/huggingface/hub/models--lt-asset--nova-1.3b"
-    "/snapshots/4b4805bac4f13ef8bec678072ef60609ea3b0e77"
-)
+_SNAPSHOT_HASH = "4b4805bac4f13ef8bec678072ef60609ea3b0e77"
+
+def _resolve_nova_cache_dir() -> str:
+    """Resolve Nova model snapshot dir, respecting HF_HOME if set.
+
+    Priority:
+      1. $HF_HOME/hub/models--lt-asset--nova-1.3b/snapshots/<hash>
+      2. ~/.cache/huggingface/hub/models--lt-asset--nova-1.3b/snapshots/<hash>
+    """
+    hf_home = os.environ.get(
+        "HF_HOME",
+        os.path.expanduser("~/.cache/huggingface")
+    )
+    return os.path.join(
+        hf_home, "hub", "models--lt-asset--nova-1.3b",
+        "snapshots", _SNAPSHOT_HASH
+    )
+
+NOVA_CACHE_DIR = _resolve_nova_cache_dir()
 MODEL_ID = "lt-asset/nova-1.3b"
 
 

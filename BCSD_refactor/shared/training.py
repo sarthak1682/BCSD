@@ -24,6 +24,7 @@ def run_generic_train(
     temperature: float = 0.05,
     mntp: bool = False,
     max_steps: Optional[int] = None,
+    wandb_log=None,  # callable(dict) — pass wandb.log to enable per-step remote logging
 ) -> None:
     """Unified training loop supporting Causal-LM, MNTP, and contrastive training.
 
@@ -120,10 +121,13 @@ def run_generic_train(
                     
                     if (step // grad_accum) > 0 and (step // grad_accum) % log_interval == 0:
                         w = losses[-log_interval:]
+                        avg = sum(w) / len(w)
                         log_fn(
                             f"  step {step:>6}/{len(dataloader)}"
-                            f"  loss={sum(w)/len(w):.4f}  skipped={skipped}"
+                            f"  loss={avg:.4f}  skipped={skipped}"
                         )
+                        if wandb_log is not None:
+                            wandb_log({"train/loss": avg, "train/step": step, "train/skipped": skipped})
 
             else:
                 b = {k: v.to(device) for k, v in batch.items()}
@@ -157,10 +161,13 @@ def run_generic_train(
                 losses.append(loss.item())
                 if step > 0 and step % log_interval == 0:
                     w = losses[-log_interval:]
+                    avg = sum(w) / len(w)
                     log_fn(
                         f"  step {step:>6}/{len(dataloader)}"
-                        f"  loss={sum(w)/len(w):.4f}  skipped={skipped}"
+                        f"  loss={avg:.4f}  skipped={skipped}"
                     )
+                    if wandb_log is not None:
+                        wandb_log({"train/loss": avg, "train/step": step, "train/skipped": skipped})
 
         if not contrastive and losses and len(losses) % grad_accum != 0:
             torch.nn.utils.clip_grad_norm_(trainable, max_grad_norm)

@@ -345,6 +345,10 @@ def main() -> None:
     parser.add_argument("--temperature",  type=float, default=CFG["temperature"])
     # --- Eval ---
     parser.add_argument("--eval_batch_size", type=int, default=CFG["eval_batch_size"])
+    # --- Remote monitoring ---
+    parser.add_argument("--wandb_project", default=None,
+                        help="W&B project name for remote monitoring (optional). "
+                             "Requires: pip install wandb && wandb login")
 
     args = parser.parse_args()
 
@@ -362,9 +366,27 @@ def main() -> None:
     log_path = os.path.join(args.output_dir,
                             f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
+    # --- wandb (optional) ---
+    _wandb = None
+    if args.wandb_project:
+        try:
+            import wandb as _wandb_mod
+            _wandb = _wandb_mod
+            _wandb.init(
+                project=args.wandb_project,
+                name=f"nova_ebm_bench_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                config=vars(args),
+            )
+            print(f"wandb run: {_wandb.run.url}")
+        except Exception as e:
+            print(f"[warn] wandb init failed ({e}) — continuing without remote logging")
+            _wandb = None
+
     def log(msg: str) -> None:
         print(msg)
         with open(log_path, "a") as fh: fh.write(msg + "\n")
+        if _wandb is not None:
+            _wandb.log({"log": msg})
 
     log(f"Nova EBM  |  {datetime.now()}  |  stages={args.stages}")
     log(f"output_dir={args.output_dir}  device={device}\n")
@@ -420,7 +442,8 @@ def main() -> None:
         )
         run_generic_train(model, loader, args.s1_epochs, args.s1_lr,
                           args.s1_grad_accum, args.max_grad_norm,
-                          args.warmup_ratio, args.log_interval, log)
+                          args.warmup_ratio, args.log_interval, log,
+                          wandb_log=_wandb.log if _wandb else None)
 
         model   = model.merge_and_unload()
         s1_ckpt = os.path.join(args.output_dir, "s1_final")
@@ -448,7 +471,8 @@ def main() -> None:
         run_generic_train(model, loader, args.s2_epochs, args.s2_lr,
                           args.s2_grad_accum, args.max_grad_norm,
                           args.warmup_ratio, args.log_interval, log, mntp=True,
-                          max_steps=args.s2_max_steps)
+                          max_steps=args.s2_max_steps,
+                          wandb_log=_wandb.log if _wandb else None)
 
         model   = model.merge_and_unload()
         s2_ckpt = os.path.join(args.output_dir, "s2_final")
@@ -477,7 +501,8 @@ def main() -> None:
                           args.s3_grad_accum, args.max_grad_norm,
                           args.warmup_ratio, args.log_interval, log,
                           contrastive=True, pooling_head=pooling_head,
-                          temperature=args.temperature)
+                          temperature=args.temperature,
+                          wandb_log=_wandb.log if _wandb else None)
 
         model   = model.merge_and_unload()
         s3_ckpt = os.path.join(args.output_dir, "s3_final")
