@@ -34,9 +34,10 @@ echo -n "[3/4] Fetching HuggingFace Nova Model... "
 python3 -c "
 import os
 import logging
+os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
 logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
 from huggingface_hub import snapshot_download
-snapshot_download('lt-asset/nova-1.3b', disable_tqdm=True)
+snapshot_download('lt-asset/nova-1.3b')
 " >/dev/null
 echo "OK"
 
