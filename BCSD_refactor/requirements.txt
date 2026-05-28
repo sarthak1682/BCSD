@@ -1,0 +1,43 @@
+# =============================================================================
+# requirements.txt — Nova EBM bench pipeline
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# For CUDA 12.1 (most A100/H100 clusters):
+#   pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+#
+# For CUDA 11.8:
+#   pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cu118
+#   pip install -r requirements.txt
+#
+# NOTE: torch itself is listed below WITHOUT a CUDA-specific URL so that
+#       pip doesn't pull a CPU-only build on a fresh env. On the cluster,
+#       install torch first with the CUDA-specific URL above, then run
+#       this file — pip will see torch already satisfies the requirement
+#       and skip reinstalling it.
+# =============================================================================
+
+# --- Core ML framework ---
+torch
+
+# --- HuggingFace stack ---
+transformers>=4.40.0        # NovaForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
+peft>=0.10.0                # LoraConfig, get_peft_model, PeftModel, DoRA support
+accelerate>=0.28.0          # Required internally by peft + transformers for device_map
+
+# --- Numerics ---
+numpy>=1.23.0,<2.0          # Nova tokenizer uses np.maximum; avoid numpy 2.x API breaks
+
+# --- Training utilities ---
+tqdm>=4.65.0                # Progress bars
+
+# --- Evaluation (optional but used in eval_bench.py) ---
+scikit-learn>=1.2.0         # TSNE visualisation in eval scripts (imported with try/except, won't crash if missing)
+
+# --- Plotting (used in some train scripts with matplotlib.use('Agg')) ---
+matplotlib>=3.7.0
+
+# --- Dataset download ---
+gdown>=4.7.3                # download_dataset.py; auto-installed by the script if missing

@@ -10,6 +10,7 @@ import argparse
 import gc
 import json
 import os
+import random
 import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -37,15 +38,21 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
-# Paths
-repo_root = os.path.abspath(os.path.join(script_dir, "../../../"))
-TRAIN_DATA = "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_train_nova.jsonl"
-if not os.path.exists(TRAIN_DATA):
-    TRAIN_DATA = os.path.join(repo_root, "output_benchset_rebalanced_train_nova.jsonl")
+# Paths (defaults — all overridable via CLI args)
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_repo_root  = os.path.abspath(os.path.join(_script_dir, "../../../"))
 
-EVAL_DATA = "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_test_nova.jsonl"
-if not os.path.exists(EVAL_DATA):
-    EVAL_DATA = os.path.join(repo_root, "output_benchset_rebalanced_test_nova.jsonl")
+_DEFAULT_TRAIN = "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_train_nova.jsonl"
+if not os.path.exists(_DEFAULT_TRAIN):
+    _DEFAULT_TRAIN = os.path.join(_repo_root, "nvemb", "output_benchset_rebalanced_train_nova.jsonl")
+if not os.path.exists(_DEFAULT_TRAIN):
+    _DEFAULT_TRAIN = os.path.join(_repo_root, "output_benchset_rebalanced_train_nova.jsonl")
+
+_DEFAULT_EVAL = "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_test_nova.jsonl"
+if not os.path.exists(_DEFAULT_EVAL):
+    _DEFAULT_EVAL = os.path.join(_repo_root, "nvemb", "output_benchset_rebalanced_test_nova.jsonl")
+if not os.path.exists(_DEFAULT_EVAL):
+    _DEFAULT_EVAL = os.path.join(_repo_root, "output_benchset_rebalanced_test_nova.jsonl")
 
 OUTPUT_DIR         = "./model_checkpoints/nova_ebm_bench"
 POOLING_HEAD_FNAME = "pooling_head.pt"
@@ -279,7 +286,7 @@ def run_eval(model, pooling_head, nova_tokenizer, eval_samples, args, log_fn) ->
     report = compute_report(result)
     report["source"] = os.path.abspath(emb_path)
     report["model"] = "nova_ebm_bench"
-    report["data"] = os.path.abspath(EVAL_DATA)
+    report["data"] = os.path.abspath(args.eval_data)
 
     report_path = os.path.join(args.output_dir, "eval_bench_report.json")
     with open(report_path, "w") as f:
@@ -292,17 +299,56 @@ def run_eval(model, pooling_head, nova_tokenizer, eval_samples, args, log_fn) ->
 # Main
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Nova EBM bench training: stages 1 (cross-opt), 2 (MNTP), 3 (contrastive) + eval"
+    )
+    # --- Stage control ---
     parser.add_argument("--stages",     default="1,2,3",
-                        help="e.g. '1,2,3' | '2,3' | 'eval'")
-    parser.add_argument("--s1_ckpt",    default=None)
-    parser.add_argument("--s2_ckpt",    default=None)
-    parser.add_argument("--s3_ckpt",    default=None)
-    parser.add_argument("--output_dir", default=OUTPUT_DIR)
-    parser.add_argument("--max_length", type=int, default=CFG["max_length"])
-    parser.add_argument("--seed",       type=int, default=CFG["seed"])
+                        help="Comma-separated stages to run, e.g. '1,2,3' | '2,3' | 'eval'")
+    parser.add_argument("--s1_ckpt",    default=None, help="Path to stage-1 checkpoint to resume from")
+    parser.add_argument("--s2_ckpt",    default=None, help="Path to stage-2 checkpoint to resume from")
+    parser.add_argument("--s3_ckpt",    default=None, help="Path to stage-3 checkpoint for eval")
+    # --- Paths ---
+    parser.add_argument("--output_dir", default=OUTPUT_DIR, help="Root dir for all stage checkpoints")
+    parser.add_argument("--train_data", default=_DEFAULT_TRAIN,
+                        help="Path to train .jsonl (overrides hardcoded default)")
+    parser.add_argument("--eval_data",  default=_DEFAULT_EVAL,
+                        help="Path to eval .jsonl  (overrides hardcoded default)")
+    # --- Hardware ---
+    parser.add_argument("--gpu_id",     type=int, default=CFG["gpu_id"],
+                        help="GPU index to use when CUDA_VISIBLE_DEVICES is not set by scheduler")
+    # --- Common hyper-params ---
+    parser.add_argument("--max_length", type=int,   default=CFG["max_length"])
+    parser.add_argument("--seed",       type=int,   default=CFG["seed"])
+    parser.add_argument("--max_grad_norm", type=float, default=CFG["max_grad_norm"])
+    parser.add_argument("--warmup_ratio",  type=float, default=CFG["warmup_ratio"])
+    parser.add_argument("--log_interval", type=int,   default=CFG["log_interval"])
+    # --- Stage 1 ---
+    parser.add_argument("--s1_epochs",    type=int,   default=CFG["s1_epochs"])
+    parser.add_argument("--s1_batch",     type=int,   default=CFG["s1_batch"])
+    parser.add_argument("--s1_grad_accum",type=int,   default=CFG["s1_grad_accum"])
+    parser.add_argument("--s1_lr",        type=float, default=CFG["s1_lr"])
+    parser.add_argument("--bidir_pairs",  action="store_true", default=CFG["bidir_pairs"])
+    # --- Stage 2 ---
+    parser.add_argument("--s2_epochs",    type=int,   default=CFG["s2_epochs"])
+    parser.add_argument("--s2_batch",     type=int,   default=CFG["s2_batch"])
+    parser.add_argument("--s2_grad_accum",type=int,   default=CFG["s2_grad_accum"])
+    parser.add_argument("--s2_lr",        type=float, default=CFG["s2_lr"])
+    parser.add_argument("--mask_prob",    type=float, default=CFG["mask_prob"])
+    parser.add_argument("--s2_max_steps", type=int,   default=1000,
+                        help="Hard step cap for MNTP stage (default 1000)")
+    # --- Stage 3 ---
+    parser.add_argument("--s3_epochs",    type=int,   default=CFG["s3_epochs"])
+    parser.add_argument("--s3_batch",     type=int,   default=CFG["s3_batch"])
+    parser.add_argument("--s3_grad_accum",type=int,   default=CFG["s3_grad_accum"])
+    parser.add_argument("--s3_lr",        type=float, default=CFG["s3_lr"])
+    parser.add_argument("--temperature",  type=float, default=CFG["temperature"])
+    # --- Eval ---
+    parser.add_argument("--eval_batch_size", type=int, default=CFG["eval_batch_size"])
+
     args = parser.parse_args()
 
+    # Back-fill any CFG keys not yet exposed as explicit args (forward-compat)
     for k, v in CFG.items():
         if not hasattr(args, k):
             setattr(args, k, v)
@@ -343,8 +389,20 @@ def main() -> None:
         return m
 
     log("Loading datasets …")
-    train_samples = load_binarycorp_jsonl(TRAIN_DATA)
-    eval_samples  = load_binarycorp_jsonl(EVAL_DATA)
+    log(f"  train: {args.train_data}")
+    log(f"  eval:  {args.eval_data}")
+    if not os.path.exists(args.train_data):
+        raise FileNotFoundError(
+            f"Train data not found: {args.train_data}\n"
+            "Run:  python BCSD_refactor/download_dataset.py --output_dir <dir>"
+        )
+    if not os.path.exists(args.eval_data):
+        raise FileNotFoundError(
+            f"Eval data not found: {args.eval_data}\n"
+            "Run:  python BCSD_refactor/download_dataset.py --output_dir <dir>"
+        )
+    train_samples = load_binarycorp_jsonl(args.train_data)
+    eval_samples  = load_binarycorp_jsonl(args.eval_data)
 
     # Stage 1
     if "1" in run_stages:
@@ -390,7 +448,7 @@ def main() -> None:
         run_generic_train(model, loader, args.s2_epochs, args.s2_lr,
                           args.s2_grad_accum, args.max_grad_norm,
                           args.warmup_ratio, args.log_interval, log, mntp=True,
-                          max_steps=1000)
+                          max_steps=args.s2_max_steps)
 
         model   = model.merge_and_unload()
         s2_ckpt = os.path.join(args.output_dir, "s2_final")
