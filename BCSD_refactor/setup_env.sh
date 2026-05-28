@@ -37,7 +37,7 @@ import logging
 logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
 from huggingface_hub import snapshot_download
 snapshot_download('lt-asset/nova-1.3b', disable_tqdm=True)
-" &>/dev/null
+" >/dev/null
 echo "OK"
 
 # --- 4. Retrieving Bench Datasets ---
