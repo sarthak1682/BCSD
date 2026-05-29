@@ -17,7 +17,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gres=gpu:a100:1                        # 1 x A100; change to gpu:1 if cluster auto-assigns
+#SBATCH --gres=gpu:1                             # 1 GPU; cluster assigns whichever is available
 #SBATCH --mem=64G
 
 # ---------------------------------------------------------------------------
@@ -33,23 +33,25 @@ echo "========================================="
 
 # ---------------------------------------------------------------------------
 # 1.  Environment setup
-#     Adjust module names and conda env to match your cluster.
 # ---------------------------------------------------------------------------
 module purge
-module load cuda/12.1        # or cuda/11.8 — whatever your cluster has
-module load python/3.10      # if the cluster uses environment modules
+module load cuda/12.1 2>/dev/null || module load cuda/11.8 2>/dev/null || true   # best-effort; SLURM sets CUDA_VISIBLE_DEVICES automatically
 
-# Activate conda (adjust path as needed)
+# Activate conda — creates the 'bcsd' env if it doesn't exist yet
 source ~/.bashrc
-conda activate bcsd           # <-- change to your conda env name
+if ! conda env list | grep -q '^bcsd '; then
+    echo "Creating conda env 'bcsd'..."
+    conda create -y -n bcsd python=3.10
+fi
+conda activate bcsd
 
 # ---------------------------------------------------------------------------
-# 2.  Paths
-#     Edit REPO_ROOT and DATA_DIR to match where you cloned and downloaded.
+# 2.  Paths  (auto-detected from script location — no manual editing needed)
 # ---------------------------------------------------------------------------
-REPO_ROOT="/home/ra72yeq/projects/NovaXLLM2Vec"       # top-level repo
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." &>/dev/null && pwd)"   # BCSD_refactor/slurm_scripts → BCSD
 BCSD_REFACTOR="${REPO_ROOT}/BCSD_refactor"
-DATA_DIR="${REPO_ROOT}/nvemb"                           # where the .jsonl files live
+DATA_DIR="${REPO_ROOT}/nvemb"                                  # where the .jsonl files live
 OUTPUT_DIR="${REPO_ROOT}/outputs/nova_ebm_bench_${SLURM_JOB_ID}"
 
 TRAIN_DATA="${DATA_DIR}/output_benchset_rebalanced_train_nova.jsonl"
