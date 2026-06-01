@@ -1,8 +1,11 @@
-"""Training script for Nova EBM stages 1-3 and evaluation (bench dataset).
+"""Training script for Nova EBM stages 1, 3 and evaluation (bench dataset).
+
+Stage 2 (MNTP) is disabled — empirically hurts performance with Nova
+(assembly-specialized model that already handles bidirectional attention).
 
 Examples:
-  python run_stages.py --stages 1,2,3
-  python run_stages.py --stages 2,3 --s1_ckpt ./ckpts/s1_final
+  python run_stages.py --stages 1,3
+  python run_stages.py --stages 3 --s1_ckpt ./ckpts/s1_final
   python run_stages.py --stages eval --s3_ckpt ./ckpts/s3_final
 """
 
@@ -24,7 +27,7 @@ from eval_bench import build_eval_pairs, compute_report, print_report_summary
 from shared.data_utils import set_seed, load_jsonl as load_binarycorp_jsonl, parse_bench_opt, asm_to_text, group_samples_by_id
 from shared.nova_utils import make_bidirectional_nova_mask, NOVA_CACHE_DIR, MODEL_ID
 from shared.pooling import AttentionPooling
-from shared.collators import TranslationCollator, MNTPCollator, PairCollator
+from shared.collators import TranslationCollator, PairCollator
 from shared.losses import contrastive_loss_positive_aware
 from shared.training import run_generic_train
 
@@ -66,7 +69,6 @@ DORA_CFG = dict(
     bias           = "none",
     target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
                       "gate_proj", "up_proj", "down_proj"],
-    modules_to_save= ["embed_tokens", "lm_head"],
 )
 
 # Hyperparameters
@@ -80,11 +82,11 @@ CFG = dict(
     # Stage 1
     s1_epochs      = 1,    s1_batch = 32,  s1_grad_accum = 8,  s1_lr = 1.6e-4,
     bidir_pairs    = True,
-    # Stage 2
-    s2_epochs      = 1,    s2_batch = 32,  s2_grad_accum = 8,  s2_lr = 1.6e-3,
-    mask_prob      = 0.15,
+    # Stage 2 (MNTP — disabled, kept for reference)
+    # s2_epochs    = 1,    s2_batch = 32,  s2_grad_accum = 8,  s2_lr = 1.6e-3,
+    # mask_prob    = 0.15,
     # Stage 3
-    s3_epochs      = 1,    s3_batch = 32,  s3_grad_accum = 1,  s3_lr = 1.5e-5,
+    s3_epochs      = 1,    s3_batch = 32,  s3_grad_accum = 4,  s3_lr = 3e-5,
     temperature    = 0.05,
     # Eval
     eval_batch_size = 16,
@@ -300,13 +302,12 @@ def run_eval(model, pooling_head, nova_tokenizer, eval_samples, args, log_fn) ->
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Nova EBM bench training: stages 1 (cross-opt), 2 (MNTP), 3 (contrastive) + eval"
+        description="Nova EBM bench training: stages 1 (cross-opt), 3 (contrastive) + eval"
     )
     # --- Stage control ---
-    parser.add_argument("--stages",     default="1,2,3",
-                        help="Comma-separated stages to run, e.g. '1,2,3' | '2,3' | 'eval'")
+    parser.add_argument("--stages",     default="1,3",
+                        help="Comma-separated stages to run, e.g. '1,3' | '3' | 'eval'")
     parser.add_argument("--s1_ckpt",    default=None, help="Path to stage-1 checkpoint to resume from")
-    parser.add_argument("--s2_ckpt",    default=None, help="Path to stage-2 checkpoint to resume from")
     parser.add_argument("--s3_ckpt",    default=None, help="Path to stage-3 checkpoint for eval")
     # --- Paths ---
     parser.add_argument("--output_dir", default=OUTPUT_DIR, help="Root dir for all stage checkpoints")
@@ -329,14 +330,14 @@ def main() -> None:
     parser.add_argument("--s1_grad_accum",type=int,   default=CFG["s1_grad_accum"])
     parser.add_argument("--s1_lr",        type=float, default=CFG["s1_lr"])
     parser.add_argument("--bidir_pairs",  action="store_true", default=CFG["bidir_pairs"])
-    # --- Stage 2 ---
-    parser.add_argument("--s2_epochs",    type=int,   default=CFG["s2_epochs"])
-    parser.add_argument("--s2_batch",     type=int,   default=CFG["s2_batch"])
-    parser.add_argument("--s2_grad_accum",type=int,   default=CFG["s2_grad_accum"])
-    parser.add_argument("--s2_lr",        type=float, default=CFG["s2_lr"])
-    parser.add_argument("--mask_prob",    type=float, default=CFG["mask_prob"])
-    parser.add_argument("--s2_max_steps", type=int,   default=1000,
-                        help="Hard step cap for MNTP stage (default 1000)")
+    # --- Stage 2 (MNTP — disabled) ---
+    # parser.add_argument("--s2_epochs",    type=int,   default=CFG["s2_epochs"])
+    # parser.add_argument("--s2_batch",     type=int,   default=CFG["s2_batch"])
+    # parser.add_argument("--s2_grad_accum",type=int,   default=CFG["s2_grad_accum"])
+    # parser.add_argument("--s2_lr",        type=float, default=CFG["s2_lr"])
+    # parser.add_argument("--mask_prob",    type=float, default=CFG["mask_prob"])
+    # parser.add_argument("--s2_max_steps", type=int,   default=1000,
+    #                     help="Hard step cap for MNTP stage (default 1000)")
     # --- Stage 3 ---
     parser.add_argument("--s3_epochs",    type=int,   default=CFG["s3_epochs"])
     parser.add_argument("--s3_batch",     type=int,   default=CFG["s3_batch"])
@@ -398,8 +399,6 @@ def main() -> None:
     from modeling_nova import NovaForCausalLM, NovaTokenizer  
 
     base_tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    base_tokenizer.add_special_tokens({'additional_special_tokens': ['[MASK]']})
-    MASK_ID        = base_tokenizer.encode('[MASK]')[-1]
     nova_tokenizer = NovaTokenizer(base_tokenizer)
 
     def _load_nova(from_dir=None):
@@ -453,40 +452,40 @@ def main() -> None:
         args.s1_ckpt = s1_ckpt
         del model; gc.collect(); torch.cuda.empty_cache()
 
-    # Stage 2
-    if "2" in run_stages:
-        log("\nStage 2: MNTP (bidirectional encoder)")
-        base = _load_nova(args.s1_ckpt)
-        base.gradient_checkpointing_enable()
-        base.config.use_cache = False
-        model = _wrap_dora(base)
-        model.enable_input_require_grads()
-
-        loader = DataLoader(
-            train_samples,
-            batch_size=args.s2_batch, shuffle=True, num_workers=4, pin_memory=True,
-            persistent_workers=True, prefetch_factor=2,
-            collate_fn=MNTPCollator(nova_tokenizer, MASK_ID,
-                                    mask_prob=args.mask_prob,
-                                    max_length=args.max_length),
-        )
-        run_generic_train(model, loader, args.s2_epochs, args.s2_lr,
-                          args.s2_grad_accum, args.max_grad_norm,
-                          args.warmup_ratio, args.log_interval, log, mntp=True,
-                          max_steps=args.s2_max_steps,
-                          wandb_log=_wandb.log if _wandb else None)
-
-        model   = model.merge_and_unload()
-        s2_ckpt = os.path.join(args.output_dir, "s2_final")
-        model.save_pretrained(s2_ckpt)
-        log(f"  saved (merged) → {s2_ckpt}")
-        args.s2_ckpt = s2_ckpt
-        del model; gc.collect(); torch.cuda.empty_cache()
+    # Stage 2 (MNTP — disabled, empirically hurts Nova performance)
+    # if "2" in run_stages:
+    #     log("\nStage 2: MNTP (bidirectional encoder)")
+    #     base = _load_nova(args.s1_ckpt)
+    #     base.gradient_checkpointing_enable()
+    #     base.config.use_cache = False
+    #     model = _wrap_dora(base)
+    #     model.enable_input_require_grads()
+    #
+    #     loader = DataLoader(
+    #         train_samples,
+    #         batch_size=args.s2_batch, shuffle=True, num_workers=4, pin_memory=True,
+    #         persistent_workers=True, prefetch_factor=2,
+    #         collate_fn=MNTPCollator(nova_tokenizer, MASK_ID,
+    #                                 mask_prob=args.mask_prob,
+    #                                 max_length=args.max_length),
+    #     )
+    #     run_generic_train(model, loader, args.s2_epochs, args.s2_lr,
+    #                       args.s2_grad_accum, args.max_grad_norm,
+    #                       args.warmup_ratio, args.log_interval, log, mntp=True,
+    #                       max_steps=args.s2_max_steps,
+    #                       wandb_log=_wandb.log if _wandb else None)
+    #
+    #     model   = model.merge_and_unload()
+    #     s2_ckpt = os.path.join(args.output_dir, "s2_final")
+    #     model.save_pretrained(s2_ckpt)
+    #     log(f"  saved (merged) → {s2_ckpt}")
+    #     args.s2_ckpt = s2_ckpt
+    #     del model; gc.collect(); torch.cuda.empty_cache()
 
     # Stage 3
     if "3" in run_stages:
         log("\nStage 3: Supervised contrastive + attention pooling")
-        base = _load_nova(args.s2_ckpt)
+        base = _load_nova(args.s1_ckpt)
         base.gradient_checkpointing_enable()
         base.config.use_cache = False
         model = _wrap_dora(base)
