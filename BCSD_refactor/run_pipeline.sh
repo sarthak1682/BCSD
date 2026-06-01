@@ -8,6 +8,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 
 GPU_ID="${GPU_ID:-0}"   # override with: GPU_ID=1 bash run_pipeline.sh
 
+# Auto-logging: mirrors all output to logs/run_<timestamp>.log
+LOG_FILE="${REPO_ROOT}/logs/run_$(date +%Y%m%d_%H%M%S)_gpu${GPU_ID}.log"
+mkdir -p "${REPO_ROOT}/logs"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "Logging to: ${LOG_FILE}"
+
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/BCSD_refactor:${PYTHONPATH:-}"
 
 python3 "${REPO_ROOT}/BCSD_refactor/binarycorp_bench/nova_ebm/run_stages.py" \
