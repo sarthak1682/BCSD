@@ -3,9 +3,10 @@
 Minimalist guide to setup and execute the 3-stage training pipeline (Cross-opt translation, MNTP, and Contrastive learning).
 
 ## 1. Setup Environment
-Installs all dependencies (with pinned working versions), fetches the Hugging Face `lt-asset/nova-1.3b` model snapshot, and retrieves the rebalanced benchmark datasets:
+Activate your conda environment first, then run the setup script (installs pinned dependencies, fetches the Hugging Face `lt-asset/nova-1.3b` model snapshot, and retrieves the rebalanced benchmark datasets):
 
 ```bash
+conda activate <your_env>
 bash BCSD_refactor/setup_env.sh
 ```
 
