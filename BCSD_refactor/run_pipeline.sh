@@ -26,4 +26,4 @@ python3 "${REPO_ROOT}/BCSD_refactor/binarycorp_bench/nova_ebm/run_stages.py" \
     --s3_grad_accum 8 \
     --s3_lr         3e-5 \
     --s3_epochs     1 \
-    --log_interval  10
+    --log_interval  500
