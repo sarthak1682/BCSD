@@ -1,5 +1,6 @@
 """Unified training utilities for Nova model stages."""
 
+import sys
 from typing import List, Optional
 import torch
 import torch.nn as nn
@@ -7,6 +8,13 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from transformers import get_cosine_schedule_with_warmup
 from shared.losses import cgte_loss, contrastive_loss_positive_aware
+
+
+def _log_step(msg: str, log_fn) -> None:
+    """Write a training step message to stderr (for terminal visibility alongside tqdm)
+    and via log_fn (for file persistence)."""
+    print(msg, file=sys.stderr, flush=True)
+    log_fn(msg)
 
 
 def run_generic_train(
@@ -126,8 +134,7 @@ def run_generic_train(
                             f"  step {step:>6}/{len(dataloader)}"
                             f"  loss={avg:.4f}  skipped={skipped}"
                         )
-                        tqdm.write(msg)
-                        log_fn(msg)
+                        _log_step(msg, log_fn)
                         if wandb_log is not None:
                             wandb_log({"train/loss": avg, "train/step": step, "train/skipped": skipped})
 
@@ -168,8 +175,7 @@ def run_generic_train(
                         f"  step {step:>6}/{len(dataloader)}"
                         f"  loss={avg:.4f}  skipped={skipped}"
                     )
-                    tqdm.write(msg)
-                    log_fn(msg)
+                    _log_step(msg, log_fn)
                     if wandb_log is not None:
                         wandb_log({"train/loss": avg, "train/step": step, "train/skipped": skipped})
 

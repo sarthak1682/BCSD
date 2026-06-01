@@ -63,13 +63,13 @@ CFG = dict(
     warmup_ratio   = 0.03,
     log_interval   = 100,
     # Stage 1
-    s1_epochs      = 1,    s1_batch = 4,   s1_grad_accum = 8,  s1_lr = 2e-5,
+    s1_epochs      = 1,    s1_batch = 32,  s1_grad_accum = 8,  s1_lr = 1.6e-4,
     bidir_pairs    = True,
     # Stage 2
-    s2_epochs      = 1,    s2_batch = 4,   s2_grad_accum = 8,  s2_lr = 2e-4,
+    s2_epochs      = 1,    s2_batch = 32,  s2_grad_accum = 8,  s2_lr = 1.6e-3,
     mask_prob      = 0.15,
     # Stage 3
-    s3_epochs      = 1,    s3_batch = 8,   s3_grad_accum = 8,  s3_lr = 3e-5,
+    s3_epochs      = 1,    s3_batch = 32,  s3_grad_accum = 1,  s3_lr = 1.5e-5,
     temperature    = 0.05,
     # Eval
     eval_batch_size = 16,
@@ -311,7 +311,8 @@ def main() -> None:
 
         loader = DataLoader(
             CrossOptTranslationDataset(train_samples, bidirectional=args.bidir_pairs),
-            batch_size=args.s1_batch, shuffle=True, num_workers=0, pin_memory=True,
+            batch_size=args.s1_batch, shuffle=True, num_workers=4, pin_memory=True,
+            persistent_workers=True, prefetch_factor=2,
             collate_fn=TranslationCollator(nova_tokenizer, args.max_length),
         )
         run_generic_train(model, loader, args.s1_epochs, args.s1_lr,
@@ -336,7 +337,8 @@ def main() -> None:
 
         loader = DataLoader(
             train_samples,
-            batch_size=args.s2_batch, shuffle=True, num_workers=0, pin_memory=True,
+            batch_size=args.s2_batch, shuffle=True, num_workers=4, pin_memory=True,
+            persistent_workers=True, prefetch_factor=2,
             collate_fn=MNTPCollator(nova_tokenizer, MASK_ID,
                                     mask_prob=args.mask_prob,
                                     max_length=args.max_length),
@@ -365,7 +367,8 @@ def main() -> None:
 
         loader = DataLoader(
             ContrastivePairDataset(train_samples),
-            batch_size=args.s3_batch, shuffle=True, num_workers=0, pin_memory=True,
+            batch_size=args.s3_batch, shuffle=True, num_workers=4, pin_memory=True,
+            persistent_workers=True, prefetch_factor=2,
             collate_fn=PairCollator(nova_tokenizer, args.max_length),
         )
         run_generic_train(model, loader, args.s3_epochs, args.s3_lr,
