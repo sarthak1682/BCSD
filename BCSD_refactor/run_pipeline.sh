@@ -6,6 +6,8 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 
+GPU_ID="${GPU_ID:-0}"   # override with: GPU_ID=1 bash run_pipeline.sh
+
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/BCSD_refactor:${PYTHONPATH:-}"
 
 python3 "${REPO_ROOT}/BCSD_refactor/binarycorp_bench/nova_ebm/run_stages.py" \
@@ -13,7 +15,7 @@ python3 "${REPO_ROOT}/BCSD_refactor/binarycorp_bench/nova_ebm/run_stages.py" \
     --train_data    "${REPO_ROOT}/nvemb/output_benchset_rebalanced_train_nova.jsonl" \
     --eval_data     "${REPO_ROOT}/nvemb/output_benchset_rebalanced_test_nova.jsonl" \
     --output_dir    "${REPO_ROOT}/test_output" \
-    --gpu_id        0 \
+    --gpu_id        "${GPU_ID}" \
     --s1_batch      4 \
     --s1_grad_accum 8 \
     --s1_lr         2e-5 \
