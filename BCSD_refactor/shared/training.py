@@ -122,10 +122,12 @@ def run_generic_train(
                     if (step // grad_accum) > 0 and (step // grad_accum) % log_interval == 0:
                         w = losses[-log_interval:]
                         avg = sum(w) / len(w)
-                        log_fn(
+                        msg = (
                             f"  step {step:>6}/{len(dataloader)}"
                             f"  loss={avg:.4f}  skipped={skipped}"
                         )
+                        tqdm.write(msg)
+                        log_fn(msg)
                         if wandb_log is not None:
                             wandb_log({"train/loss": avg, "train/step": step, "train/skipped": skipped})
 
@@ -162,10 +164,12 @@ def run_generic_train(
                 if step > 0 and step % log_interval == 0:
                     w = losses[-log_interval:]
                     avg = sum(w) / len(w)
-                    log_fn(
+                    msg = (
                         f"  step {step:>6}/{len(dataloader)}"
                         f"  loss={avg:.4f}  skipped={skipped}"
                     )
+                    tqdm.write(msg)
+                    log_fn(msg)
                     if wandb_log is not None:
                         wandb_log({"train/loss": avg, "train/step": step, "train/skipped": skipped})
 
