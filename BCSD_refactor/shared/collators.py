@@ -163,24 +163,29 @@ class DistillCollator:
         self.nova_tokenizer = nova_tokenizer
         self.max_length = max_length
         self.pad_id = nova_tokenizer.tokenizer.pad_token_id or 0
+        self.instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
+        # Precompute instruction token length for pool_mask construction (mirrors NV-Embed's
+        # instruction_lens used to zero out instruction tokens from mean pooling).
+        self.instruct_token_len = len(nova_tokenizer.tokenizer.tokenize(self.instruct_template))
 
     def __call__(self, batch):
         flat_texts = []
         func_ids = []
-        instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
         for (q, p, fid) in batch:
-            if not q.startswith(instruct_template):
-                q = instruct_template + q
+            if not q.startswith(self.instruct_template):
+                q = self.instruct_template + q
             flat_texts.extend([q, p])
             func_ids.extend([fid, fid])
 
-        all_ids, all_masks = [], []
+        all_ids, all_masks, is_query = [], [], []
         for text in flat_texts:
-            if text.startswith(instruct_template):
-                asm_len = len(text) - len(instruct_template)
-                char_types = "0" * len(instruct_template) + "1" * asm_len
+            if text.startswith(self.instruct_template):
+                asm_len = len(text) - len(self.instruct_template)
+                char_types = "0" * len(self.instruct_template) + "1" * asm_len
+                is_query.append(True)
             else:
                 char_types = "1" * len(text)
+                is_query.append(False)
             result = self.nova_tokenizer.encode("", text, char_types)
             ids = result['input_ids'][:self.max_length]
             raw_mask = result['nova_attention_mask']
@@ -192,8 +197,9 @@ class DistillCollator:
             all_masks.append(mask)
 
         max_len = max(len(x) for x in all_ids)
-        pad_ids = np.full((len(flat_texts), max_len), self.pad_id, dtype=np.int64)
-        pad_masks = np.zeros((len(flat_texts), max_len, max_len), dtype=np.float32)
+        n = len(flat_texts)
+        pad_ids = np.full((n, max_len), self.pad_id, dtype=np.int64)
+        pad_masks = np.zeros((n, max_len, max_len), dtype=np.float32)
 
         for i, (ids, mask) in enumerate(zip(all_ids, all_masks)):
             L = len(ids)
@@ -202,9 +208,19 @@ class DistillCollator:
 
         key_padding_mask = (pad_ids == self.pad_id)
 
+        # pool_mask: True = exclude token from LAL mean pooling.
+        # Excludes padding positions AND instruction prefix token positions (for query texts),
+        # mirroring NV-Embed's pool_mask that zeroes out instruction tokens before mean pooling.
+        pool_mask = key_padding_mask.copy()
+        for i, query in enumerate(is_query):
+            if query:
+                excl = min(self.instruct_token_len, len(all_ids[i]))
+                pool_mask[i, :excl] = True
+
         return {
             "input_ids": torch.tensor(pad_ids),
             "nova_attention_mask": torch.tensor(pad_masks, dtype=torch.bfloat16),
             "key_padding_mask": torch.tensor(key_padding_mask),
+            "pool_mask": torch.tensor(pool_mask),
             "func_ids": torch.tensor(func_ids, dtype=torch.long),
         }

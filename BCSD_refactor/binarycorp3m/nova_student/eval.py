@@ -90,21 +90,24 @@ def extract_student_embeddings(samples, batch_size=32, max_len=512):
     all_embs, all_ids, all_opts = [], [], []
     total_batches = (len(samples) + batch_size - 1) // batch_size
 
-    profiler = InferenceProfiler(device)
-    is_warmup = True
+    # Precompute instruction token length for pool_mask
+    instruct_token_len = len(nova_tokenizer.tokenizer.tokenize(INSTRUCT_TEMPLATE))
 
     for i in range(0, len(samples), batch_size):
         batch_idx = (i // batch_size) + 1
         batch = samples[i:i+batch_size]
         # tokenize
         all_ids_list = []
+        is_query = []
         for s in batch:
             if s.get('opt', 'O0') == 'O0':
                 text = INSTRUCT_TEMPLATE + s["asm"]
                 char_types = "0" * len(INSTRUCT_TEMPLATE) + "1" * len(s["asm"])
+                is_query.append(True)
             else:
                 text = s["asm"]
                 char_types = "1" * len(text)
+                is_query.append(False)
                 
             result = nova_tokenizer.encode("", text, char_types)
             ids = result["input_ids"][:max_len]
@@ -117,10 +120,17 @@ def extract_student_embeddings(samples, batch_size=32, max_len=512):
 
         input_ids = torch.tensor(pad_ids, device=device)
         key_padding_mask = (input_ids == pad_id)
+        
+        # Build pool_mask (padding + instruction prefix excluded)
+        pool_mask = key_padding_mask.clone()
+        for j, query in enumerate(is_query):
+            if query:
+                excl = min(instruct_token_len, len(all_ids_list[j]))
+                pool_mask[j, :excl] = True
 
         with profiler:
             hidden = student(input_ids, key_padding_mask=key_padding_mask)
-            emb = lal_head(hidden, key_padding_mask=key_padding_mask)
+            emb = lal_head(hidden, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
         profiler.total_samples += len(batch)
 
         # Exclude CUDA init from profiler by resetting after first batch

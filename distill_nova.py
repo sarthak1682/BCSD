@@ -108,41 +108,56 @@ HIDDEN_DIM = teacher_model.config.hidden_size
 print(f"Teacher Hidden Dim: {HIDDEN_DIM}")
 
 
+# Adapted from the official NV-Embed LatentAttentionModel implementation.
+# Paper: "NV-Embed: Improved Techniques for Training LLMs as Generalist Embedding Models"
+#        Lee et al., 2024 — https://arxiv.org/abs/2405.17428
+# Source: https://huggingface.co/nvidia/NV-Embed-v2/blob/main/modeling_nvembed.py
+#         (class LatentAttentionModel)
+# Changes: uses nn.MultiheadAttention instead of a custom Attention module;
+#          GELU + 4x expansion instead of GEGLU + 8x; adapted for our student pipeline.
 class LatentAttentionLayer(nn.Module):
-    """Distills sequence into a single embedding via Perceiver-style cross-attention."""
+    """Distills sequence into a single embedding via NV-Embed-style cross-attention.
+    Q=sequence, K/V=latents; Pre-LN on both Q and context, residuals after
+    attention and feedforward, then masked mean-pool over the sequence."""
     def __init__(self, hidden_dim, num_latents=512, num_heads=8):
         super().__init__()
         self.latents = nn.Parameter(torch.randn(num_latents, hidden_dim))
 
-        self.attn_norm = nn.LayerNorm(hidden_dim)
-        self.cross_attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+        # Pre-LN: separate norms for query (sequence) and context (latents)
+        self.norm_seq = nn.LayerNorm(hidden_dim)
+        self.norm_latents = nn.LayerNorm(hidden_dim)
+        self.norm_ff = nn.LayerNorm(hidden_dim)
 
-        self.mlp_norm = nn.LayerNorm(hidden_dim)
+        self.cross_attn = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim * 4),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim)
+            nn.Linear(hidden_dim * 4, hidden_dim)
         )
 
-    def forward(self, hidden_states, key_padding_mask=None):
+    def forward(self, hidden_states, key_padding_mask=None, pool_mask=None):
         batch_size = hidden_states.shape[0]
         latents = self.latents.unsqueeze(0).expand(batch_size, -1, -1)
 
-        # Cross-attention with Pre-LN and residual
-        normed_latents = self.attn_norm(latents)
-        attn_output, _ = self.cross_attn(
-            query=normed_latents,
-            key=hidden_states,
-            value=hidden_states,
-            key_padding_mask=key_padding_mask
-        )
-        latents = latents + attn_output  # Residual 1
+        # Pre-LN on both Q (sequence) and K/V (latents)
+        normed_seq = self.norm_seq(hidden_states)
+        normed_latents = self.norm_latents(latents)
 
-        # MLP with Pre-LN and residual
-        mlp_out = self.mlp(self.mlp_norm(latents))
-        latents = latents + mlp_out  # Residual 2
+        # Cross-attention: Q=sequence, K/V=latents — no mask needed on K/V (latents have no padding)
+        attn_output, _ = self.cross_attn(query=normed_seq, key=normed_latents, value=normed_latents)
+        hidden_states = hidden_states + attn_output  # Residual 1
 
-        return latents.mean(dim=1)
+        # Pre-LN + FeedForward + Residual
+        hidden_states = hidden_states + self.mlp(self.norm_ff(hidden_states))  # Residual 2
+
+        # Masked mean pool — pool_mask excludes padding AND instruction prefix tokens;
+        # falls back to key_padding_mask (padding only) if pool_mask is not supplied.
+        exclude_mask = pool_mask if pool_mask is not None else key_padding_mask
+        if exclude_mask is not None:
+            mask = (~exclude_mask).unsqueeze(-1).to(hidden_states.dtype)  # [B, S, 1]
+            return (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+        return hidden_states.mean(dim=1)
+
 
 
 class PositionalEncoding(nn.Module):
@@ -221,23 +236,28 @@ class DistillCollator:
         self.nova_tokenizer = nova_tokenizer
         self.max_length = max_length
         self.pad_id = nova_tokenizer.tokenizer.pad_token_id or 0
+        self.instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
+        # Precompute instruction token length for pool_mask construction (mirrors NV-Embed's
+        # instruction_lens used to zero out instruction tokens from mean pooling).
+        self.instruct_token_len = len(nova_tokenizer.tokenizer.tokenize(self.instruct_template))
 
     def __call__(self, batch):
         flat_texts = []
-        func_ids =[]
+        func_ids = []
         for (q, p, fid) in batch:
             flat_texts.extend([q, p])
             func_ids.extend([fid, fid])
 
-        all_ids, all_masks = [],[]
+        all_ids, all_masks, is_query = [], [], []
 
-        instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
         for text in flat_texts:
-            if text.startswith(instruct_template):
-                asm_len = len(text) - len(instruct_template)
-                char_types = "0" * len(instruct_template) + "1" * asm_len
+            if text.startswith(self.instruct_template):
+                asm_len = len(text) - len(self.instruct_template)
+                char_types = "0" * len(self.instruct_template) + "1" * asm_len
+                is_query.append(True)
             else:
                 char_types = "1" * len(text)
+                is_query.append(False)
             result = self.nova_tokenizer.encode("", text, char_types)
             ids = result['input_ids'][:self.max_length]
             raw_mask = result['nova_attention_mask']
@@ -249,8 +269,9 @@ class DistillCollator:
             all_masks.append(mask)
 
         max_len = max(len(x) for x in all_ids)
-        pad_ids = np.full((len(flat_texts), max_len), self.pad_id, dtype=np.int64)
-        pad_masks = np.zeros((len(flat_texts), max_len, max_len), dtype=np.float32)
+        n = len(flat_texts)
+        pad_ids = np.full((n, max_len), self.pad_id, dtype=np.int64)
+        pad_masks = np.zeros((n, max_len, max_len), dtype=np.float32)
 
         for i, (ids, mask) in enumerate(zip(all_ids, all_masks)):
             L = len(ids)
@@ -259,11 +280,21 @@ class DistillCollator:
 
         key_padding_mask = (pad_ids == self.pad_id)
 
+        # pool_mask: True = exclude token from LAL mean pooling.
+        # Excludes padding positions AND instruction prefix token positions (for query texts),
+        # mirroring NV-Embed's pool_mask that zeroes out instruction tokens before mean pooling.
+        pool_mask = key_padding_mask.copy()
+        for i, query in enumerate(is_query):
+            if query:
+                excl = min(self.instruct_token_len, len(all_ids[i]))
+                pool_mask[i, :excl] = True
+
         return {
             "input_ids": torch.tensor(pad_ids),
             "nova_attention_mask": torch.tensor(pad_masks, dtype=torch.bfloat16),
             "key_padding_mask": torch.tensor(key_padding_mask),
-            "func_ids": func_ids
+            "pool_mask": torch.tensor(pool_mask),
+            "func_ids": torch.tensor(func_ids, dtype=torch.long),
         }
 
 
@@ -323,6 +354,7 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
             nova_mask = batch['nova_attention_mask'].to(device)
             func_ids = batch['func_ids']
             key_padding_mask = batch['key_padding_mask'].to(device)
+            pool_mask = batch['pool_mask'].to(device)
 
             teacher_out = teacher_model(
                 input_ids=input_ids,
@@ -333,7 +365,7 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
             h_student = student_model(input_ids, key_padding_mask=key_padding_mask)
 
             loss_distill = masked_mse_loss(h_student, h_teacher.detach(), key_padding_mask)
-            embeddings = lal_head(h_student, key_padding_mask=key_padding_mask)
+            embeddings = lal_head(h_student, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
             loss_contrastive = contrastive_loss_positive_aware(embeddings, func_ids)
 
             loss_total = loss_contrastive + (LAMBDA_END * loss_distill)
@@ -374,6 +406,7 @@ for epoch in range(NUM_EPOCHS):
             h_teacher = teacher_out.hidden_states[-1]
             
         key_padding_mask = batch['key_padding_mask'].to(device)
+        pool_mask = batch['pool_mask'].to(device)
         h_student = student_model(input_ids, key_padding_mask=key_padding_mask)
 
         if TOTAL_STEPS <= 1:
@@ -390,7 +423,7 @@ for epoch in range(NUM_EPOCHS):
         else:
             h_selected = h_student
             
-        embeddings = lal_head(h_selected, key_padding_mask=key_padding_mask)
+        embeddings = lal_head(h_selected, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
         loss_contrastive = contrastive_loss_positive_aware(embeddings, func_ids)
         
         loss_total = loss_contrastive + (lambda_mse * loss_distill)

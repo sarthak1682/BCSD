@@ -74,15 +74,19 @@ print("Loaded test samples")
 def encode_student_texts(texts, batch_size=32, max_len=1024, profiler=None):
     all_embs = []
     total_batches = (len(texts) + batch_size - 1) // batch_size
+    instruct_token_len = len(nova_tokenizer.tokenizer.tokenize(INSTRUCT_TEMPLATE))
 
     for i in range(0, len(texts), batch_size):
         batch_idx = (i // batch_size) + 1
         batch = texts[i:i+batch_size]
         all_ids_list = []
+        is_query = []
         for text, char_types in batch:
             result = nova_tokenizer.encode("", text, char_types)
             ids = result["input_ids"][:max_len]
             all_ids_list.append(ids)
+            # If the text starts with the instruction template, mark it as query
+            is_query.append(text.startswith(INSTRUCT_TEMPLATE))
 
         max_len_batch = max(len(x) for x in all_ids_list)
         pad_ids = np.full((len(batch), max_len_batch), pad_id, dtype=np.int64)
@@ -92,14 +96,21 @@ def encode_student_texts(texts, batch_size=32, max_len=1024, profiler=None):
         input_ids = torch.tensor(pad_ids, device=device)
         key_padding_mask = (input_ids == pad_id)
 
+        # Build pool_mask (padding + instruction prefix excluded)
+        pool_mask = key_padding_mask.clone()
+        for j, query in enumerate(is_query):
+            if query:
+                excl = min(instruct_token_len, len(all_ids_list[j]))
+                pool_mask[j, :excl] = True
+
         if profiler is not None:
             with profiler:
                 hidden = student(input_ids, key_padding_mask=key_padding_mask)
-                emb = lal_head(hidden, key_padding_mask=key_padding_mask)
+                emb = lal_head(hidden, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
             profiler.total_samples += len(batch)
         else:
             hidden = student(input_ids, key_padding_mask=key_padding_mask)
-            emb = lal_head(hidden, key_padding_mask=key_padding_mask)
+            emb = lal_head(hidden, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
 
         all_embs.append(emb.float().cpu())
 

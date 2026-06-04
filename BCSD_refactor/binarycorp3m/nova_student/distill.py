@@ -148,6 +148,7 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
             nova_mask = batch['nova_attention_mask'].to(device)
             func_ids = batch['func_ids']
             key_padding_mask = batch['key_padding_mask'].to(device)
+            pool_mask = batch['pool_mask'].to(device)
 
             teacher_out = teacher_model(
                 input_ids=input_ids,
@@ -158,7 +159,7 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
             h_student = student_model(input_ids, key_padding_mask=key_padding_mask)
 
             loss_distill = masked_mse_loss(h_student, h_teacher.detach(), key_padding_mask)
-            embeddings = lal_head(h_student, key_padding_mask=key_padding_mask)
+            embeddings = lal_head(h_student, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
             loss_contrastive = contrastive_loss_positive_aware(embeddings, func_ids)
 
             loss_total = loss_contrastive + (LAMBDA_END * loss_distill)
@@ -199,6 +200,7 @@ for epoch in range(NUM_EPOCHS):
             h_teacher = teacher_out.hidden_states[-1]
             
         key_padding_mask = batch['key_padding_mask'].to(device)
+        pool_mask = batch['pool_mask'].to(device)
         h_student = student_model(input_ids, key_padding_mask=key_padding_mask)
 
         if TOTAL_STEPS <= 1:
@@ -215,7 +217,7 @@ for epoch in range(NUM_EPOCHS):
         else:
             h_selected = h_student
             
-        embeddings = lal_head(h_selected, key_padding_mask=key_padding_mask)
+        embeddings = lal_head(h_selected, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
         loss_contrastive = contrastive_loss_positive_aware(embeddings, func_ids)
         
         loss_total = loss_contrastive + (lambda_mse * loss_distill)
