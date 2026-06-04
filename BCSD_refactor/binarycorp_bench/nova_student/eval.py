@@ -36,7 +36,9 @@ if not os.path.exists(TEST_PATH):
 
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 RUN_ID = 20
-STUDENT_DIR = os.path.join(script_dir_file, f"nova_distilled_student_{RUN_ID}_bench")
+STUDENT_DIR = "./model_checkpoints/nova_student_bench/student_final"
+if not os.path.exists(STUDENT_DIR):
+    STUDENT_DIR = os.path.join(script_dir_file, f"nova_distilled_student_{RUN_ID}_bench")
 RESULTS_PATH = os.path.join(script_dir_file, f"eval_student_bench_results_{RUN_ID}.pt")  # legacy fallback
 TSNE_PATH = os.path.join(script_dir_file, f"eval_student_bench_tsne_{RUN_ID}.png")
 TSNE_NUM_PAIRS = 40

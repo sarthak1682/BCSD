@@ -41,7 +41,7 @@ DATA_PATH = os.path.join(script_dir, "binarycorp3m_train_nova.jsonl")
 
 RUN_ID = 20
 script_dir_file = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(script_dir_file, f"nova_distilled_student_{RUN_ID}")
+OUTPUT_DIR = "./model_checkpoints/nova_student"
 RESUME_DIR = "/home/ra72yeq/projects/NovaXLLM2Vec/nova_distilled_student_10"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -277,10 +277,10 @@ for epoch in range(NUM_EPOCHS):
         if val_loss + EARLY_STOP_MIN_DELTA < best_val_loss:
             best_val_loss = val_loss
             bad_epochs = 0
-            if not os.path.exists(OUTPUT_DIR):
-                os.makedirs(OUTPUT_DIR)
-            torch.save(student_model.state_dict(), os.path.join(OUTPUT_DIR, "student_model_best.pt"))
-            torch.save(lal_head.state_dict(), os.path.join(OUTPUT_DIR, "lal_head_best.pt"))
+            best_dir = os.path.join(OUTPUT_DIR, "student_best")
+            os.makedirs(best_dir, exist_ok=True)
+            torch.save(student_model.state_dict(), os.path.join(best_dir, "student_model_best.pt"))
+            torch.save(lal_head.state_dict(), os.path.join(best_dir, "lal_head_best.pt"))
         else:
             bad_epochs += 1
             if bad_epochs >= EARLY_STOP_PATIENCE:
@@ -289,19 +289,25 @@ for epoch in range(NUM_EPOCHS):
 
 log("Distillation Complete.")
 
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
+final_dir = os.path.join(OUTPUT_DIR, "student_final")
+os.makedirs(final_dir, exist_ok=True)
 
-log(f"Saving to {OUTPUT_DIR}...")
-torch.save(student_model.state_dict(), os.path.join(OUTPUT_DIR, "student_model.pt"))
-torch.save(lal_head.state_dict(), os.path.join(OUTPUT_DIR, "lal_head.pt"))
+log(f"Saving to {final_dir}...")
+torch.save(student_model.state_dict(), os.path.join(final_dir, "student_model.pt"))
+torch.save(lal_head.state_dict(), os.path.join(final_dir, "lal_head.pt"))
 
 config = {
     "vocab_size": len(base_tokenizer),
     "hidden_dim": HIDDEN_DIM,
     "num_layers": STUDENT_LAYERS
 }
-with open(os.path.join(OUTPUT_DIR, "student_config.json"), "w") as f:
+with open(os.path.join(final_dir, "student_config.json"), "w") as f:
     json.dump(config, f)
+
+# Also save config to student_best if it exists
+best_dir = os.path.join(OUTPUT_DIR, "student_best")
+if os.path.exists(best_dir):
+    with open(os.path.join(best_dir, "student_config.json"), "w") as f:
+        json.dump(config, f)
 
 log("Process finished successfully.")

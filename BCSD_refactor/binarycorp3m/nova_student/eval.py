@@ -37,8 +37,8 @@ script_dir_repo = os.path.abspath(os.path.join(script_dir_file, "../../../"))
 
 TEST_PATH = os.path.join(script_dir_repo, "binarycorp3m_test_nova.jsonl")
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
-RUN_ID = 10
-STUDENT_DIR = os.path.join(script_dir_file, "nova_distilled_student_new_10")
+RUN_ID = 20
+STUDENT_DIR = "./model_checkpoints/nova_student/student_final"
 if not os.path.exists(STUDENT_DIR):
     STUDENT_DIR = os.path.join(script_dir_file, "nova_distilled_student_20")
 
