@@ -37,15 +37,12 @@ ADAPTER_PATH = os.path.abspath(os.path.join(script_dir_file, "../nova_teacher/no
 if not os.path.exists(ADAPTER_PATH):
     ADAPTER_PATH = "/home/ra72yeq/projects/NovaXLLM2Vec/nova_contrastive_bidir_noMNTP_bench"
 
-repo_root = os.path.abspath(os.path.join(script_dir_file, "../../../"))
-DATA_PATH = os.path.join(repo_root, "nvemb", "output_benchset_rebalanced_train_nova.jsonl")
-if not os.path.exists(DATA_PATH):
-    DATA_PATH = os.path.join(repo_root, "output_benchset_rebalanced_train_nova.jsonl")
+# Go up 3 levels to repository root where the jsonl files are located
+script_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+DATA_PATH = os.path.join(script_dir, "./nvemb/output_benchset_rebalanced_train_nova.jsonl")
 
 RUN_ID = 20
 OUTPUT_DIR = "./model_checkpoints/nova_student_bench"
-RESUME_FROM_CHECKPOINT = False
-RESUME_DIR = "/home/ra72yeq/projects/NovaXLLM2Vec/nova_distilled_student_10"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 log_path = os.path.join(OUTPUT_DIR, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
@@ -67,7 +64,7 @@ NUM_EPOCHS = 20
 TOTAL_STEPS = None 
 MAX_LENGTH = 1024
 STUDENT_LAYERS = 2
-LAMBDA_START = 0.05 if RESUME_FROM_CHECKPOINT else 1.0
+LAMBDA_START = 1.0
 LAMBDA_END = 0.05
 VAL_SPLIT = 0.1
 EARLY_STOP_PATIENCE = 3
@@ -173,12 +170,7 @@ student_model = StudentDistillationModule(
 
 lal_head = LatentAttentionLayer(hidden_dim=HIDDEN_DIM).to(device).to(torch.bfloat16)
 
-if RESUME_FROM_CHECKPOINT:
-    log(f"Warm-starting student from {RESUME_DIR}...")
-    student_model.load_state_dict(torch.load(os.path.join(RESUME_DIR, "student_model.pt"), map_location="cpu"))
-    lal_head.load_state_dict(torch.load(os.path.join(RESUME_DIR, "lal_head.pt"), map_location="cpu"))
-else:
-    log("Training student from scratch.")
+log("Training student from scratch.")
 
 def count_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

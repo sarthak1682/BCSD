@@ -37,12 +37,11 @@ if not os.path.exists(ADAPTER_PATH):
 
 # Go up 3 levels to repository root where the jsonl files are located
 script_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
-DATA_PATH = os.path.join(script_dir, "binarycorp3m_train_nova.jsonl")
+DATA_PATH = os.path.join(script_dir, "./nvemb/binarycorp3m_train_nova.jsonl")
 
 RUN_ID = 20
 script_dir_file = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = "./model_checkpoints/nova_student"
-RESUME_DIR = "/home/ra72yeq/projects/NovaXLLM2Vec/nova_distilled_student_10"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 log_path = os.path.join(OUTPUT_DIR, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")

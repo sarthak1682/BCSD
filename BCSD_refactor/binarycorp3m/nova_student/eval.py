@@ -33,9 +33,8 @@ except Exception:
 CACHE_DIR = "/home/ra72yeq/.cache/huggingface/hub/models--lt-asset--nova-1.3b/snapshots/4b4805bac4f13ef8bec678072ef60609ea3b0e77"
 script_dir_file = os.path.dirname(os.path.abspath(__file__))
 # Go up 3 levels to repository root where the jsonl files are located
-script_dir_repo = os.path.abspath(os.path.join(script_dir_file, "../../../"))
-
-TEST_PATH = os.path.join(script_dir_repo, "binarycorp3m_test_nova.jsonl")
+script_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+TEST_PATH = os.path.join(script_dir, "./nvemb/binarycorp3m_test_nova.jsonl")
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 RUN_ID = 20
 STUDENT_DIR = "./model_checkpoints/nova_student/student_final"

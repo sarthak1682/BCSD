@@ -29,10 +29,9 @@ except Exception:
 
 CACHE_DIR = "/home/ra72yeq/.cache/huggingface/hub/models--lt-asset--nova-1.3b/snapshots/4b4805bac4f13ef8bec678072ef60609ea3b0e77"
 
-repo_root = os.path.abspath(os.path.join(script_dir_file, "../../../"))
-TEST_PATH = os.path.join(repo_root, "nvemb", "output_benchset_rebalanced_test_nova.jsonl")
-if not os.path.exists(TEST_PATH):
-    TEST_PATH = os.path.join(repo_root, "output_benchset_rebalanced_test_nova.jsonl")
+# Go up 3 levels to repository root where the jsonl files are located
+script_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+TEST_PATH = os.path.join(script_dir, "./nvemb/output_benchset_rebalanced_test_nova.jsonl")
 
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 RUN_ID = 20
