@@ -44,6 +44,19 @@ script_dir_file = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(script_dir_file, f"nova_distilled_student_{RUN_ID}")
 RESUME_DIR = "/home/ra72yeq/projects/NovaXLLM2Vec/nova_distilled_student_10"
 
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+log_path = os.path.join(OUTPUT_DIR, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+
+def log(msg: str, print_to_stdout: bool = True) -> None:
+    if print_to_stdout:
+        print(msg)
+    with open(log_path, "a") as fh:
+        fh.write(msg + "\n")
+
+def log_write(msg: str) -> None:
+    tqdm.write(msg)
+    log(msg, print_to_stdout=False)
+
 BATCH_SIZE = 32
 GRAD_ACCUM = 4
 LR = 1e-4
@@ -61,9 +74,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 sys.path.insert(0, CACHE_DIR)
 from modeling_nova import NovaForCausalLM, NovaTokenizer
 
-print(f"Using device: {device}")
+log(f"Using device: {device}")
 
-print("Loading Data...")
+log("Loading Data...")
 train_samples = load_binarycorp_jsonl(DATA_PATH)
 
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
@@ -79,16 +92,16 @@ for func_id in o0_dict:
         text_pos = o3_dict[func_id]['asm']
         pairs.append((text_query, text_pos, str_to_int_map[func_id]))
 
-print(f"Loaded {len(pairs)} instructed pairs for distillation.")
+log(f"Loaded {len(pairs)} instructed pairs for distillation.")
 
 random.shuffle(pairs)
 
 val_size = max(1, int(len(pairs) * VAL_SPLIT)) if len(pairs) > 1 else 0
 val_pairs = pairs[:val_size]
 train_pairs = pairs[val_size:]
-print(f"Train pairs: {len(train_pairs)} | Val pairs: {len(val_pairs)}")
+log(f"Train pairs: {len(train_pairs)} | Val pairs: {len(val_pairs)}")
 
-print("Loading Teacher (Nova)...")
+log("Loading Teacher (Nova)...")
 base_tokenizer = AutoTokenizer.from_pretrained("lt-asset/nova-1.3b", cache_dir=CACHE_DIR)
 base_tokenizer.add_special_tokens({'additional_special_tokens': ['[MASK]']})
 nova_tokenizer = NovaTokenizer(base_tokenizer)
@@ -101,17 +114,17 @@ teacher_model = NovaForCausalLM.from_pretrained(
 teacher_model.resize_token_embeddings(len(base_tokenizer))
 
 if os.path.exists(ADAPTER_PATH):
-    print(f"Loading trained adapter from {ADAPTER_PATH}...")
+    log(f"Loading trained adapter from {ADAPTER_PATH}...")
     teacher_model = PeftModel.from_pretrained(teacher_model, ADAPTER_PATH)
     teacher_model = teacher_model.merge_and_unload() 
 else:
-    print("WARNING: Adapter not found. Using raw Nova as teacher.")
+    log("WARNING: Adapter not found. Using raw Nova as teacher.")
 
 teacher_model.requires_grad_(False)
 teacher_model.eval()
 
 HIDDEN_DIM = teacher_model.config.hidden_size
-print(f"Teacher Hidden Dim: {HIDDEN_DIM}")
+log(f"Teacher Hidden Dim: {HIDDEN_DIM}")
 
 student_model = StudentDistillationModule(
     vocab_size=len(base_tokenizer),
@@ -170,7 +183,7 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
     return total / max(1, steps)
 
 
-print(f"Starting Distillation for {TOTAL_STEPS} steps...")
+log(f"Starting Distillation for {TOTAL_STEPS} steps...")
 
 student_model.train()
 lal_head.train()
@@ -241,7 +254,7 @@ for epoch in range(NUM_EPOCHS):
                 avg_total = running_total / GRAD_ACCUM
                 avg_contrastive = running_contrastive / GRAD_ACCUM
                 avg_distill = running_distill / GRAD_ACCUM
-                tqdm.write(
+                log_write(
                     f" Step {global_step}: "
                     f"Loss={avg_total:.4f} (Cont={avg_contrastive:.3f}, Dist={avg_distill:.3f}, "
                     f"lambda={lambda_mse:.3f})"
@@ -259,7 +272,7 @@ for epoch in range(NUM_EPOCHS):
 
     if val_loader is not None:
         val_loss = evaluate_distill(student_model, lal_head, teacher_model, val_loader)
-        print(f"Epoch {epoch+1} Val Loss: {val_loss:.4f}")
+        log(f"Epoch {epoch+1} Val Loss: {val_loss:.4f}")
 
         if val_loss + EARLY_STOP_MIN_DELTA < best_val_loss:
             best_val_loss = val_loss
@@ -271,15 +284,15 @@ for epoch in range(NUM_EPOCHS):
         else:
             bad_epochs += 1
             if bad_epochs >= EARLY_STOP_PATIENCE:
-                print("Early stopping triggered.")
+                log("Early stopping triggered.")
                 break
 
-print("Distillation Complete.")
+log("Distillation Complete.")
 
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
-print(f"Saving to {OUTPUT_DIR}...")
+log(f"Saving to {OUTPUT_DIR}...")
 torch.save(student_model.state_dict(), os.path.join(OUTPUT_DIR, "student_model.pt"))
 torch.save(lal_head.state_dict(), os.path.join(OUTPUT_DIR, "lal_head.pt"))
 
@@ -291,4 +304,4 @@ config = {
 with open(os.path.join(OUTPUT_DIR, "student_config.json"), "w") as f:
     json.dump(config, f)
 
-print("Process finished successfully.")
+log("Process finished successfully.")
