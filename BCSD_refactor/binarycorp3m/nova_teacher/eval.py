@@ -6,9 +6,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
 from metrics import EvaluationEngine
-from shared.data_utils import set_seed, load_jsonl as load_binarycorp_jsonl
+from shared.data_utils import set_seed, load_jsonl as load_binarycorp_jsonl, get_embeddings_dir
 from shared.nova_utils import setup_nova_tokenizer, load_nova
 from shared.pooling import AttentionPooling
+from shared.profiling import InferenceProfiler
 
 import torch
 import numpy as np
@@ -58,6 +59,9 @@ def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_si
     all_ids = []
     all_opts = []
 
+    profiler = InferenceProfiler(device)
+    is_warmup = True
+
     print("extracting embeddings...")
 
     for i in range(0, len(samples), batch_size):
@@ -102,10 +106,18 @@ def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_si
         input_ids_t = torch.tensor(padded_ids, dtype=torch.long, device=device)
         nova_mask_t = torch.tensor(padded_masks, dtype=torch.bfloat16, device=device)
 
-        outputs = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t, output_hidden_states=True)
-        hidden = outputs.hidden_states[-1]
+        with profiler:
+            outputs = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t, output_hidden_states=True)
+            hidden = outputs.hidden_states[-1]
+            pooled = pooling_module(hidden, batch_label_positions)
+        profiler.total_samples += len(batch_samples)
 
-        pooled = pooling_module(hidden, batch_label_positions)
+        # Exclude CUDA init from profiler by resetting after first batch
+        if is_warmup:
+            profiler.total_time_ms = 0.0
+            profiler.total_samples = 0
+            is_warmup = False
+
         all_embeddings.append(pooled.cpu())
 
         all_ids.extend([s["id"] for s in batch_samples])
@@ -115,7 +127,7 @@ def extract_embeddings_smart(model, tokenizer, pooling_module, samples, batch_si
             print(f"Extracted {i}/{len(samples)}")
 
     embeddings_tensor = torch.cat(all_embeddings, dim=0)
-    return {"ids": all_ids, "opts": all_opts, "embeddings": embeddings_tensor}
+    return {"ids": all_ids, "opts": all_opts, "embeddings": embeddings_tensor, "stats": profiler.get_stats()}
 
 
 eval_result = extract_embeddings_smart(
@@ -127,9 +139,16 @@ eval_result = extract_embeddings_smart(
     device=device
 )
 
-save_name = os.path.join(script_dir, "embeddings_bidir_contrastive_noMNTP_test.pt")
+emb_dir = get_embeddings_dir("binarycorp3m", "nova_teacher")
+save_name = os.path.join(emb_dir, "eval_embeddings.pt")
 torch.save(eval_result, save_name)
 print(f"embeddings shape: {eval_result['embeddings'].shape}")
+print(f"Saved to: {save_name}")
+
+print("\n" + "="*50)
+print(f"NOVA TEACHER | Latency: {eval_result['stats']['avg_ms_per_sample']:.2f} ms/function")
+print(f"NOVA TEACHER | Memory:  {eval_result['stats']['peak_memory_mb']:.1f} MB peak")
+print("="*50)
 
 engine = EvaluationEngine(device=device)
 report = engine.evaluate(

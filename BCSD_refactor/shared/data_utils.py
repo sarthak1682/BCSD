@@ -95,3 +95,14 @@ def build_eval_pairs(samples: List[Dict], seed: int = 42) -> List[Dict]:
     print(f"Built {len(pairs)} eval pairs from {len(grouped)} functions ({skipped} skipped with <2 variants).")
     return pairs
 
+
+def get_embeddings_dir(dataset: str, model: str) -> str:
+    """Return BCSD_refactor/embeddings/{dataset}/{model}/, creating it if needed.
+
+    Uses this file's location to find the repo root — no hardcoded absolute paths.
+    """
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    emb_dir = os.path.join(repo_root, "embeddings", dataset, model)
+    os.makedirs(emb_dir, exist_ok=True)
+    return emb_dir
+

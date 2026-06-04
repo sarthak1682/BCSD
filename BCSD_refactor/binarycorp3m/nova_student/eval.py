@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../"
 from metrics import EvaluationEngine
 from shared.student_model import StudentDistillationModule, LatentAttentionLayer, PositionalEncoding
 from shared.nova_utils import setup_nova_tokenizer
+from shared.data_utils import get_embeddings_dir
+from shared.profiling import InferenceProfiler
 
 try:
     from sklearn.manifold import TSNE
@@ -40,7 +42,7 @@ STUDENT_DIR = os.path.join(script_dir_file, "nova_distilled_student_new_10")
 if not os.path.exists(STUDENT_DIR):
     STUDENT_DIR = os.path.join(script_dir_file, "nova_distilled_student_20")
 
-RESULTS_PATH = os.path.join(script_dir_file, f"eval_student_results_new_{RUN_ID}.pt")
+RESULTS_PATH = os.path.join(script_dir_file, f"eval_student_results_new_{RUN_ID}.pt")  # legacy fallback
 TSNE_PATH = os.path.join(script_dir_file, f"eval_student_tsne_nvembed_{RUN_ID}.png")
 TSNE_NUM_PAIRS = 40
 
@@ -88,6 +90,9 @@ def extract_student_embeddings(samples, batch_size=32, max_len=512):
     all_embs, all_ids, all_opts = [], [], []
     total_batches = (len(samples) + batch_size - 1) // batch_size
 
+    profiler = InferenceProfiler(device)
+    is_warmup = True
+
     for i in range(0, len(samples), batch_size):
         batch_idx = (i // batch_size) + 1
         batch = samples[i:i+batch_size]
@@ -113,8 +118,17 @@ def extract_student_embeddings(samples, batch_size=32, max_len=512):
         input_ids = torch.tensor(pad_ids, device=device)
         key_padding_mask = (input_ids == pad_id)
 
-        hidden = student(input_ids, key_padding_mask=key_padding_mask)
-        emb = lal_head(hidden, key_padding_mask=key_padding_mask)
+        with profiler:
+            hidden = student(input_ids, key_padding_mask=key_padding_mask)
+            emb = lal_head(hidden, key_padding_mask=key_padding_mask)
+        profiler.total_samples += len(batch)
+
+        # Exclude CUDA init from profiler by resetting after first batch
+        if is_warmup:
+            profiler.total_time_ms = 0.0
+            profiler.total_samples = 0
+            is_warmup = False
+
         all_embs.append(emb.float().cpu())
 
         all_ids.extend([s["id"] for s in batch])
@@ -126,13 +140,21 @@ def extract_student_embeddings(samples, batch_size=32, max_len=512):
     return {
         "ids": all_ids,
         "opts": all_opts,
-        "embeddings": torch.cat(all_embs, dim=0)
+        "embeddings": torch.cat(all_embs, dim=0),
+        "stats": profiler.get_stats()
     }
 
 # ---- 8) Run ----
 results = extract_student_embeddings(test_samples, batch_size=32, max_len=1024)
+emb_dir = get_embeddings_dir("binarycorp3m", "nova_student")
+RESULTS_PATH = os.path.join(emb_dir, "eval_embeddings.pt")
 torch.save(results, RESULTS_PATH)
 print(f"Saved embeddings to {RESULTS_PATH}")
+
+print("\n" + "="*50)
+print(f"NOVA STUDENT | Latency: {results['stats']['avg_ms_per_sample']:.2f} ms/function")
+print(f"NOVA STUDENT | Memory:  {results['stats']['peak_memory_mb']:.1f} MB peak")
+print("="*50)
 
 engine = EvaluationEngine(device=device)
 report = engine.evaluate(

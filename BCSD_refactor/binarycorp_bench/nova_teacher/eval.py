@@ -18,6 +18,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../")))
 from eval_bench import set_seed, load_jsonl, build_eval_pairs, compute_report, print_report_summary
 from shared.nova_utils import setup_nova_tokenizer, load_nova
 from shared.pooling import AttentionPooling
+from shared.data_utils import get_embeddings_dir
+from shared.profiling import InferenceProfiler
 
 MODEL_ID = "lt-asset/nova-1.3b"
 OPT_LEVELS = ("O0", "O1", "O2", "O3")
@@ -56,7 +58,7 @@ pooling_head.eval()
 
 
 @torch.no_grad()
-def encode_texts(model, tokenizer, pooling_module, texts, batch_size=32, device="cuda"):
+def encode_texts(model, tokenizer, pooling_module, texts, batch_size=32, device="cuda", profiler=None):
     model.eval()
     pooling_module.eval()
 
@@ -97,11 +99,19 @@ def encode_texts(model, tokenizer, pooling_module, texts, batch_size=32, device=
         input_ids_t = torch.tensor(padded_ids, dtype=torch.long, device=device)
         nova_mask_t = torch.tensor(padded_masks, dtype=torch.bfloat16, device=device)
 
-        outputs = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t, output_hidden_states=True)
-        hidden = outputs.hidden_states[-1]
-        del outputs
+        if profiler is not None:
+            with profiler:
+                outputs = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t, output_hidden_states=True)
+                hidden = outputs.hidden_states[-1]
+                del outputs
+                pooled = pooling_module(hidden, batch_label_positions)
+            profiler.total_samples += len(batch_texts)
+        else:
+            outputs = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t, output_hidden_states=True)
+            hidden = outputs.hidden_states[-1]
+            del outputs
+            pooled = pooling_module(hidden, batch_label_positions)
 
-        pooled = pooling_module(hidden, batch_label_positions)
         all_embeddings.append(pooled.cpu())
 
         if i % 500 == 0:
@@ -128,10 +138,19 @@ def extract_bench_eval_embeddings(model, tokenizer, pooling_module, pairs, batch
         query_opts.append(pair["query"]["opt"])
         target_opts.append(pair["target"]["opt"])
 
+    profiler = InferenceProfiler(device)
+
+    # Warmup: run first batch outside profiler stats
+    print("Warmup pass...")
+    _ = encode_texts(model, tokenizer, pooling_module, query_texts[:batch_size],
+                     batch_size=batch_size, device=device)
+
     print("Encoding query embeddings...")
-    query_embeddings = encode_texts(model, tokenizer, pooling_module, query_texts, batch_size=batch_size, device=device)
+    query_embeddings = encode_texts(model, tokenizer, pooling_module, query_texts,
+                                    batch_size=batch_size, device=device, profiler=profiler)
     print("Encoding target embeddings...")
-    target_embeddings = encode_texts(model, tokenizer, pooling_module, target_texts, batch_size=batch_size, device=device)
+    target_embeddings = encode_texts(model, tokenizer, pooling_module, target_texts,
+                                     batch_size=batch_size, device=device, profiler=profiler)
 
     return {
         "ids": ids,
@@ -139,6 +158,7 @@ def extract_bench_eval_embeddings(model, tokenizer, pooling_module, pairs, batch
         "target_opts": target_opts,
         "query_embeddings": query_embeddings,
         "target_embeddings": target_embeddings,
+        "stats": profiler.get_stats(),
     }
 
 
@@ -153,17 +173,24 @@ def main():
         device=device
     )
 
-    save_name = os.path.join(script_dir, "embeddings_teacher_bench.pt")
+    emb_dir = get_embeddings_dir("binarycorp_bench", "nova_teacher")
+    save_name = os.path.join(emb_dir, "eval_bench_embeddings.pt")
     torch.save(eval_result, save_name)
     print(f"query embeddings shape: {eval_result['query_embeddings'].shape}")
     print(f"target embeddings shape: {eval_result['target_embeddings'].shape}")
+    print(f"Saved to: {save_name}")
+
+    print("\n" + "="*50)
+    print(f"NOVA TEACHER | Latency: {eval_result['stats']['avg_ms_per_sample']:.2f} ms/function")
+    print(f"NOVA TEACHER | Memory:  {eval_result['stats']['peak_memory_mb']:.1f} MB peak")
+    print("="*50)
 
     report = compute_report(eval_result)
     report["source"] = os.path.abspath(save_name)
     report["model"] = "nova_teacher"
     report["data"] = os.path.abspath(BENCH_TEST_PATH)
 
-    metrics_path = os.path.join(script_dir, "eval_teacher_bench_metrics.json")
+    metrics_path = os.path.join(emb_dir, "eval_teacher_bench_metrics.json")
     with open(metrics_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"Saved full report to {metrics_path}")

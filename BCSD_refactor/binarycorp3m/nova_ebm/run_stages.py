@@ -22,8 +22,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
 from metrics import EvaluationEngine
-from shared.data_utils import set_seed, load_jsonl as load_binarycorp_jsonl
+from shared.data_utils import set_seed, load_jsonl as load_binarycorp_jsonl, get_embeddings_dir
 from shared.nova_utils import make_bidirectional_nova_mask, NOVA_CACHE_DIR, MODEL_ID
+from shared.profiling import InferenceProfiler
 from shared.pooling import AttentionPooling
 from shared.collators import TranslationCollator, PairCollator
 from shared.losses import cgte_loss
@@ -154,6 +155,9 @@ def extract_embeddings(model, pooling_head, nova_tokenizer, samples,
     all_ids        = []
     all_opts       = []
 
+    profiler = InferenceProfiler(device)
+    is_warmup = True
+
     for i in range(0, len(samples), batch_size):
         batch_samples = samples[i:i + batch_size]
 
@@ -197,10 +201,18 @@ def extract_embeddings(model, pooling_head, nova_tokenizer, samples,
         input_ids_t = torch.tensor(padded_ids,   dtype=torch.long,    device=device)
         nova_mask_t = torch.tensor(padded_masks, dtype=torch.bfloat16, device=device)
 
-        outputs      = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t,
-                             output_hidden_states=True)
-        hidden       = outputs.hidden_states[-1]
-        pooled_batch = pooling_head(hidden, batch_label_positions)
+        with profiler:
+            outputs      = model(input_ids=input_ids_t, nova_attention_mask=nova_mask_t,
+                                 output_hidden_states=True)
+            hidden       = outputs.hidden_states[-1]
+            pooled_batch = pooling_head(hidden, batch_label_positions)
+        profiler.total_samples += len(batch_samples)
+
+        # Exclude CUDA init from profiler by resetting after first batch
+        if is_warmup:
+            profiler.total_time_ms = 0.0
+            profiler.total_samples = 0
+            is_warmup = False
 
         all_embeddings.append(pooled_batch.cpu())
         all_ids.extend([s["id"]  for s in batch_samples])
@@ -213,6 +225,7 @@ def extract_embeddings(model, pooling_head, nova_tokenizer, samples,
         "ids":        all_ids,
         "opts":       all_opts,
         "embeddings": torch.cat(all_embeddings, dim=0),
+        "stats":      profiler.get_stats(),
     }
 
 
@@ -225,9 +238,14 @@ def run_eval(model, pooling_head, nova_tokenizer, eval_samples, args, log_fn) ->
                                    batch_size=args.eval_batch_size,
                                    max_length=args.max_length,
                                    device=str(device))
-    emb_path = os.path.join(args.output_dir, "eval_embeddings.pt")
+    emb_dir  = get_embeddings_dir("binarycorp3m", "nova_ebm")
+    emb_path = os.path.join(emb_dir, "eval_embeddings.pt")
     torch.save(result, emb_path)
     log_fn(f"  embeddings {result['embeddings'].shape}  →  {emb_path}")
+
+    log_fn("\nPerformance Stats:")
+    log_fn(f"  Latency: {result['stats']['avg_ms_per_sample']:.2f} ms/function")
+    log_fn(f"  Memory:  {result['stats']['peak_memory_mb']:.1f} MB peak")
 
     log_fn("\nEvaluating with EvaluationEngine...")
     engine = EvaluationEngine(device=device)
