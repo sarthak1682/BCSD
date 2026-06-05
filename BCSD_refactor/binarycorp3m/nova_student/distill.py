@@ -162,21 +162,36 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
             key_padding_mask = batch['key_padding_mask'].to(device)
             pool_mask = batch['pool_mask'].to(device)
 
-            teacher_out = teacher_model(
-                input_ids=input_ids,
-                nova_attention_mask=nova_mask,
-                output_hidden_states=True
-            )
-            h_teacher = teacher_out.hidden_states[-1]
+            # Keep teacher forward in bfloat16 to avoid the FP32 logit
+            # allocation inside modeling_nova that causes OOM.
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                teacher_out = teacher_model(
+                    input_ids=input_ids,
+                    nova_attention_mask=nova_mask,
+                    output_hidden_states=True
+                )
+            # Only keep the last hidden state; drop logits / all other states.
+            h_teacher = teacher_out.hidden_states[-1].detach()
+            del teacher_out
+
             h_student = student_model(input_ids, key_padding_mask=key_padding_mask)
 
-            loss_distill = masked_mse_loss(h_student, h_teacher.detach(), key_padding_mask)
+            loss_distill = masked_mse_loss(h_student, h_teacher, key_padding_mask)
+            del h_teacher
+
             embeddings = lal_head(h_student, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
+            del h_student
             loss_contrastive = contrastive_loss_positive_aware(embeddings, func_ids)
+            del embeddings
 
             loss_total = loss_contrastive + (LAMBDA_END * loss_distill)
             total += loss_total.item()
             steps += 1
+
+            # Free GPU memory between val batches.
+            del input_ids, nova_mask, key_padding_mask, pool_mask
+            torch.cuda.empty_cache()
+
     student_model.train()
     lal_head.train()
     return total / max(1, steps)
@@ -268,6 +283,10 @@ for epoch in range(NUM_EPOCHS):
             
     if global_step >= TOTAL_STEPS:
         break
+
+    # Flush GPU memory accumulated during training before validation.
+    gc.collect()
+    torch.cuda.empty_cache()
 
     if val_loader is not None:
         val_loss = evaluate_distill(student_model, lal_head, teacher_model, val_loader)
