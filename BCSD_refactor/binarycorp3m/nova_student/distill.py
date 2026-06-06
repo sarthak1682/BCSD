@@ -59,7 +59,7 @@ def log_write(msg: str) -> None:
 BATCH_SIZE = 32
 GRAD_ACCUM = 4
 LR = 1e-4
-NUM_EPOCHS = 10
+NUM_EPOCHS = 20
 TOTAL_STEPS = None 
 MAX_LENGTH = 1024
 STUDENT_LAYERS = 2
