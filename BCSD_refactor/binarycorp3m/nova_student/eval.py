@@ -66,8 +66,15 @@ student = StudentDistillationModule(
 
 lal_head = LatentAttentionLayer(hidden_dim=cfg["hidden_dim"]).to(device).to(torch.bfloat16)
 
-student.load_state_dict(torch.load(os.path.join(STUDENT_DIR, "student_model.pt"), map_location="cpu"))
-lal_head.load_state_dict(torch.load(os.path.join(STUDENT_DIR, "lal_head.pt"), map_location="cpu"))
+# student_best/ saves as student_model_best.pt; student_final/ saves as student_model.pt
+def _ckpt(name):
+    """Resolve checkpoint filename, preferring the _best suffix variant."""
+    best = os.path.join(STUDENT_DIR, name.replace(".pt", "_best.pt"))
+    plain = os.path.join(STUDENT_DIR, name)
+    return best if os.path.exists(best) else plain
+
+student.load_state_dict(torch.load(_ckpt("student_model.pt"), map_location="cpu"))
+lal_head.load_state_dict(torch.load(_ckpt("lal_head.pt"), map_location="cpu"))
 
 student.eval()
 lal_head.eval()
