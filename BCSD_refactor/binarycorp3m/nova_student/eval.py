@@ -97,6 +97,9 @@ def extract_student_embeddings(samples, batch_size=32, max_len=512):
     all_embs, all_ids, all_opts = [], [], []
     total_batches = (len(samples) + batch_size - 1) // batch_size
 
+    profiler = InferenceProfiler(device)
+    is_warmup = True
+
     # Precompute instruction token length for pool_mask
     instruct_token_len = len(nova_tokenizer.tokenizer.tokenize(INSTRUCT_TEMPLATE))
 
