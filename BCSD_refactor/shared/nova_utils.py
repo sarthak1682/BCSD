@@ -50,7 +50,9 @@ def setup_nova_tokenizer():
     _ensure_nova_on_path()
     from modeling_nova import NovaTokenizer
 
-    base_tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, cache_dir=NOVA_CACHE_DIR)
+    base_tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_ID, cache_dir=NOVA_CACHE_DIR, local_files_only=True
+    )
     base_tokenizer.add_special_tokens({'additional_special_tokens': ['[MASK]']})
     mask_id = base_tokenizer.encode('[MASK]')[-1]
     nova_tokenizer = NovaTokenizer(base_tokenizer)
