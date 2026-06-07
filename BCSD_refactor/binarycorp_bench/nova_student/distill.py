@@ -41,7 +41,6 @@ if not os.path.exists(ADAPTER_PATH):
 script_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
 DATA_PATH = os.path.join(script_dir, "./nvemb/output_benchset_rebalanced_train_nova.jsonl")
 
-RUN_ID = 20
 OUTPUT_DIR = "./model_checkpoints/nova_student_bench"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -61,6 +60,7 @@ BATCH_SIZE = 32
 GRAD_ACCUM = 8
 LR = 1e-4
 NUM_EPOCHS = 20
+RUN_ID = NUM_EPOCHS
 TOTAL_STEPS = None 
 MAX_LENGTH = 1024
 STUDENT_LAYERS = 2

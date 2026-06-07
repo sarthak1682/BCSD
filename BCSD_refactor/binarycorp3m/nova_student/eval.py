@@ -178,3 +178,15 @@ for pool, metrics in report.items():
     print(f"NDCG@10:  {metrics['NDCG@10']:.4f}")
     print(f"Recall@1: {metrics['Recall@1']:.4f}")
     print(f"MRR:      {metrics['MRR']:.4f}")
+
+report_path = RESULTS_PATH + ".metrics.json"
+report_with_meta = {
+    "source": RESULTS_PATH,
+    "student_dir": STUDENT_DIR,
+    "latency_ms_per_sample": results["stats"]["avg_ms_per_sample"],
+    "peak_memory_mb": results["stats"]["peak_memory_mb"],
+    "metrics": report,
+}
+with open(report_path, "w") as f:
+    json.dump(report_with_meta, f, indent=2)
+print(f"\nSaved metrics report to {report_path}")
