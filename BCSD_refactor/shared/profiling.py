@@ -5,9 +5,9 @@ from typing import Dict
 
 class InferenceProfiler:
     """Tracks asynchronous CUDA time and peak memory."""
-    def __init__(self, device: str):
+    def __init__(self, device):
         self.device = device
-        self.is_cuda = 'cuda' in device
+        self.is_cuda = 'cuda' in str(device)
         if self.is_cuda:
             self.start_event = torch.cuda.Event(enable_timing=True)
             self.end_event = torch.cuda.Event(enable_timing=True)
