@@ -35,8 +35,12 @@ TEST_PATH = os.path.join(script_dir, "./nvemb/output_benchset_rebalanced_test_no
 
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 RUN_ID = 20
-STUDENT_DIR = "./model_checkpoints/nova_student_bench/student_final"
-if not os.path.exists(STUDENT_DIR):
+for _subdir in ("student_best", "student_final"):
+    _candidate = f"./model_checkpoints/nova_student_bench/{_subdir}"
+    if os.path.exists(_candidate):
+        STUDENT_DIR = _candidate
+        break
+else:
     STUDENT_DIR = os.path.join(script_dir_file, f"nova_distilled_student_{RUN_ID}_bench")
 RESULTS_PATH = os.path.join(script_dir_file, f"eval_student_bench_results_{RUN_ID}.pt")  # legacy fallback
 TSNE_PATH = os.path.join(script_dir_file, f"eval_student_bench_tsne_{RUN_ID}.png")
@@ -60,8 +64,15 @@ student = StudentDistillationModule(
 
 lal_head = LatentAttentionLayer(hidden_dim=cfg["hidden_dim"]).to(device).to(torch.bfloat16)
 
-student.load_state_dict(torch.load(os.path.join(STUDENT_DIR, "student_model.pt"), map_location="cpu"))
-lal_head.load_state_dict(torch.load(os.path.join(STUDENT_DIR, "lal_head.pt"), map_location="cpu"))
+# student_best/ saves as student_model_best.pt; student_final/ saves as student_model.pt
+def _ckpt(name):
+    """Resolve checkpoint filename, preferring the _best suffix variant."""
+    best = os.path.join(STUDENT_DIR, name.replace(".pt", "_best.pt"))
+    plain = os.path.join(STUDENT_DIR, name)
+    return best if os.path.exists(best) else plain
+
+student.load_state_dict(torch.load(_ckpt("student_model.pt"), map_location="cpu"))
+lal_head.load_state_dict(torch.load(_ckpt("lal_head.pt"), map_location="cpu"))
 
 student.eval()
 lal_head.eval()
