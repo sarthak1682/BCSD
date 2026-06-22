@@ -3,9 +3,10 @@ import torch.nn.functional as F
 import numpy as np
 import time
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
-from transformers import AutoModel, AutoTokenizer, AutoConfig
-import re 
+from collections import defaultdict
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from transformers import AutoModel, AutoTokenizer, AutoConfig, BertModel
 
 class InferenceProfiler:
     """Tracks asynchronous CUDA time and peak memory."""
@@ -117,54 +118,102 @@ class BaseEmbedder(ABC):
 
 
 class JTransEmbedder(BaseEmbedder):
-    def __init__(self, model_path: str, device: str = "cuda", batch_size: int = 32, max_length: int = 1024):
+    SPECIAL_TOKENS = ["[SEP]", "[PAD]", "[CLS]", "[MASK]"]
+    UNKNOWN_TOKEN_ID = 512
+
+    class BinBertModel(BertModel):
+        def __init__(self, config, add_pooling_layer=True):
+            super().__init__(config, add_pooling_layer=add_pooling_layer)
+            self.config = config
+            self.embeddings.position_embeddings = self.embeddings.word_embeddings
+
+    def __init__(
+        self,
+        model_path: str,
+        device: str = "cuda",
+        batch_size: int = 32,
+        max_length: int = 512,
+        tokenizer_path: Optional[str] = None,
+    ):
         super().__init__(device, batch_size)
         self.max_length = max_length
         print(f"Loading JTrans from {model_path}...")
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        # Patching jTrans broken config size mismatch
+
+        tokenizer_dir = self._resolve_tokenizer_dir(model_path, tokenizer_path)
+        self.vocab = self._load_vocab(tokenizer_dir)
+        self.pad_id = self.vocab["[PAD]"]
+        self.cls_id = self.vocab["[CLS]"]
+        self.sep_id = self.vocab["[SEP]"]
+
         config = AutoConfig.from_pretrained(model_path)
-        config.max_position_embeddings = 2902
-        
-        self.model = AutoModel.from_pretrained(model_path, config=config).to(device)
+        config.max_position_embeddings = len(self.vocab)
+
+        self.model = self.BinBertModel.from_pretrained(model_path, config=config).to(device)
         self.model.eval()
 
-    def _normalize_asm(self, asm_list: List[str]) -> str:
-        """Regex normalizer to reduce OOV explosion from raw GCC -S output."""
-        normalized = []
-        for inst in asm_list:
-            inst = re.sub(r'(#|;).*', '', inst).strip()
-            if not inst:
-                continue
-            # 'IMM' without brackets — brackets tokenize separately
-            inst = re.sub(r'-?0x[0-9a-fA-F]+', 'IMM', inst)
-            inst = re.sub(r'\.L[A-Za-z0-9_]+', 'LBL', inst)
-            inst = re.sub(r'\[.*?\]', '[MEM]', inst)
-            inst = re.sub(r'\s+', ' ', inst)
-            normalized.append(inst)
-        return "\n".join(normalized)
+    def _resolve_tokenizer_dir(self, model_path: str, tokenizer_path: Optional[str]) -> Path:
+        if tokenizer_path is not None:
+            candidate = Path(tokenizer_path)
+            if (candidate / "vocab.txt").exists():
+                return candidate
+            raise FileNotFoundError(f"JTrans tokenizer vocab not found under {candidate}")
+
+        model_dir = Path(model_path)
+        candidate_dirs = [
+            model_dir,
+            model_dir.parent / "jtrans_tokenizer",
+            Path(__file__).resolve().parent / "jTrans" / "models" / "jtrans_tokenizer",
+        ]
+        for candidate in candidate_dirs:
+            if (candidate / "vocab.txt").exists():
+                return candidate
+        raise FileNotFoundError(
+            f"Unable to locate jTrans tokenizer vocab.txt for model path {model_path}"
+        )
+
+    def _load_vocab(self, tokenizer_dir: Path) -> Dict[str, int]:
+        vocab_path = tokenizer_dir / "vocab.txt"
+        vocab_data = vocab_path.read_text(encoding="utf-8").strip().split("\n")
+        vocab_data.extend(self.SPECIAL_TOKENS)
+        return defaultdict(
+            lambda: self.UNKNOWN_TOKEN_ID,
+            {token: idx for idx, token in enumerate(vocab_data)},
+        )
+
+    def _tokenize_text(self, text: str) -> Dict[str, torch.Tensor]:
+        split_line = text.strip().split(" ") if text.strip() else []
+        if len(split_line) <= self.max_length - 3:
+            split_line = ["[CLS]"] + split_line + ["[SEP]"]
+            attention_mask = [1] * len(split_line) + [0] * (self.max_length - len(split_line))
+            split_line = split_line + (self.max_length - len(split_line)) * ["[PAD]"]
+        else:
+            split_line = ["[CLS]"] + split_line[: self.max_length - 2] + ["[SEP]"]
+            attention_mask = [1] * self.max_length
+
+        input_ids = [self.vocab[token] for token in split_line]
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+        }
 
     def prepare_input(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-        texts = []
+        input_ids, attention_masks = [], []
         for s in batch:
-            asm_list = s['asm'].split('\n') if isinstance(s['asm'], str) else s['asm']
-            texts.append(self._normalize_asm(asm_list))
-            
-        inputs = self.tokenizer(
-            texts, 
-            padding=True, 
-            truncation=True, 
-            max_length=self.max_length, 
-            return_tensors="pt"
-        )
-        return {k: v.to(self.device) for k, v in inputs.items()}
+            asm_text = s["asm"] if isinstance(s["asm"], str) else " ".join(s["asm"])
+            tokenized = self._tokenize_text(asm_text)
+            input_ids.append(tokenized["input_ids"])
+            attention_masks.append(tokenized["attention_mask"])
 
-    def forward(self, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        return self.model(**inputs).last_hidden_state
+        return {
+            "input_ids": torch.stack(input_ids).to(self.device),
+            "attention_mask": torch.stack(attention_masks).to(self.device),
+        }
 
-    def pool(self, hidden_states: torch.Tensor, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        return hidden_states[:, 0, :]
+    def forward(self, inputs: Dict[str, torch.Tensor]) -> Any:
+        return self.model(**inputs)
+
+    def pool(self, hidden_states: Any, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        return hidden_states.pooler_output
 
 
 class CLAPEmbedder(BaseEmbedder):
@@ -183,7 +232,7 @@ class CLAPEmbedder(BaseEmbedder):
             asm_list = s['asm'].split('\n') if isinstance(s['asm'], str) else s['asm']
             # Limit to 1024 instructions to save tokenization time
             asm_list = asm_list[:self.max_length]
-            clap_dict = {str(i): inst for i, inst in enumerate(asm_list)}
+            clap_dict = {str(i): inst for i, inst in enumerate(asm_list, start=1)}
             formatted_batch.append(clap_dict)
             
         # bypass broken tokenizer kwargs — get raw lists, then truncate/pad manually
