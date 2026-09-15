@@ -45,7 +45,7 @@ eval_samples = load_jsonl(BENCH_TEST_PATH)
 base_model = load_nova(device_id=0, base_tokenizer=base_tokenizer)
 
 # Load LoRA adapter
-output_dir = os.path.join(script_dir, "nova_contrastive_bidir_noMNTP_bench")
+output_dir = os.path.join(script_dir, "nova_contrastive_bidir_noMNTP_bench_ca")
 model = PeftModel.from_pretrained(base_model, output_dir)
 model.eval()
 

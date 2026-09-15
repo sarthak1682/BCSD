@@ -15,15 +15,26 @@ from transformers import AutoModel, AutoTokenizer
 script_dir = os.path.dirname(os.path.abspath(__file__))
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../")))
+sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../")))
 
 from eval_bench import set_seed, load_jsonl, build_eval_pairs, compute_report, print_report_summary
+from shared.profiling import InferenceProfiler
 
 MODEL_ID = "hustcw/clap-asm"
 
-repo_root = os.path.abspath(os.path.join(script_dir, "../../../"))
-DEFAULT_TEST_PATH = os.path.join(repo_root, "nvemb", "output_benchset_rebalanced_test_clap_strict.jsonl")
-if not os.path.exists(DEFAULT_TEST_PATH):
-    DEFAULT_TEST_PATH = os.path.join(repo_root, "output_benchset_rebalanced_test_clap_strict.jsonl")
+def resolve_test_path():
+    """Locate the CLAP-strict bench test split (same directory as the train split)."""
+    candidates = [
+        "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_test_clap_strict.jsonl",
+        os.path.abspath(os.path.join(script_dir, "../../../../nvemb/output_benchset_rebalanced_test_clap_strict.jsonl")),
+        os.path.abspath(os.path.join(script_dir, "../../../../output_benchset_rebalanced_test_clap_strict.jsonl")),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+DEFAULT_TEST_PATH = resolve_test_path()
 
 DEFAULT_EMBEDDINGS_PATH = os.path.join(script_dir, "embeddings_clap_bench.pt")
 DEFAULT_REPORT_PATH = os.path.join(script_dir, "eval_clap_bench_full_report.json")
@@ -31,7 +42,7 @@ OPT_LEVELS = ("O0", "O1", "O2", "O3")
 
 
 class CLAPEmbedder:
-    def __init__(self, model_path=MODEL_ID, device="cuda", batch_size=32, max_length=1024):
+    def __init__(self, model_path=MODEL_ID, device="cuda", batch_size=32, max_length=256):
         self.device = device
         self.batch_size = batch_size
         self.max_length = max_length
@@ -46,7 +57,7 @@ class CLAPEmbedder:
             asm = sample["asm"]
             asm_list = asm.split("\n") if isinstance(asm, str) else asm
             asm_list = asm_list[:self.max_length]
-            formatted_batch.append({str(i): inst for i, inst in enumerate(asm_list)})
+            formatted_batch.append({str(i): inst for i, inst in enumerate(asm_list, start=1)})
 
         raw_inputs = self.tokenizer(formatted_batch)
         pad_id = self.tokenizer.pad_token_id or 0
@@ -65,9 +76,14 @@ class CLAPEmbedder:
         return {k: torch.tensor(v, dtype=torch.long, device=self.device) for k, v in final_inputs.items()}
 
     @torch.no_grad()
-    def encode_batch(self, batch: List[Dict[str, Any]]) -> torch.Tensor:
+    def encode_batch(self, batch: List[Dict[str, Any]], profiler=None) -> torch.Tensor:
         inputs = self.prepare_input(batch)
-        outputs = self.model(**inputs)
+        if profiler is not None:
+            with profiler:
+                outputs = self.model(**inputs)
+            profiler.total_samples += len(batch)
+        else:
+            outputs = self.model(**inputs)
         if outputs.ndim == 3:
             embeddings = outputs[:, 0, :]
         else:
@@ -75,14 +91,14 @@ class CLAPEmbedder:
         return F.normalize(embeddings.float(), p=2, dim=1)
 
     @torch.no_grad()
-    def encode_samples(self, samples: List[Dict[str, Any]], progress_every=10) -> torch.Tensor:
+    def encode_samples(self, samples: List[Dict[str, Any]], progress_every=10, profiler=None) -> torch.Tensor:
         all_embeddings = []
         total_batches = (len(samples) + self.batch_size - 1) // self.batch_size
         start_time = time.time()
 
         for batch_idx, start in enumerate(range(0, len(samples), self.batch_size), start=1):
             batch = samples[start:start + self.batch_size]
-            embeddings = self.encode_batch(batch)
+            embeddings = self.encode_batch(batch, profiler=profiler)
             all_embeddings.append(embeddings.cpu())
 
             if progress_every and (batch_idx == 1 or batch_idx % progress_every == 0 or batch_idx == total_batches):
@@ -115,10 +131,17 @@ def extract_clap_bench_embeddings(embedder, pairs, progress_every=10):
         query_samples.append(pair["query"])
         target_samples.append(pair["target"])
 
+    profiler = InferenceProfiler(embedder.device)
+
+    print("Warmup pass...")
+    _ = embedder.encode_samples(query_samples[:embedder.batch_size], progress_every=0)
+    profiler.total_time_ms = 0.0
+    profiler.total_samples = 0
+
     print("Encoding CLAP query embeddings...")
-    query_embeddings = embedder.encode_samples(query_samples, progress_every=progress_every)
+    query_embeddings = embedder.encode_samples(query_samples, progress_every=progress_every, profiler=profiler)
     print("Encoding CLAP target embeddings...")
-    target_embeddings = embedder.encode_samples(target_samples, progress_every=progress_every)
+    target_embeddings = embedder.encode_samples(target_samples, progress_every=progress_every, profiler=profiler)
 
     return {
         "ids": ids,
@@ -126,6 +149,7 @@ def extract_clap_bench_embeddings(embedder, pairs, progress_every=10):
         "target_opts": target_opts,
         "query_embeddings": query_embeddings,
         "target_embeddings": target_embeddings,
+        "stats": profiler.get_stats(),
     }
 
 
@@ -134,7 +158,7 @@ def main():
     parser.add_argument("--data", default=DEFAULT_TEST_PATH, help="CLAP-format bench JSONL path.")
     parser.add_argument("--model", default=MODEL_ID, help="CLAP model ID or local path.")
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--max_length", type=int, default=1024)
+    parser.add_argument("--max_length", type=int, default=256)
     parser.add_argument("--progress_every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--embeddings_path", default=DEFAULT_EMBEDDINGS_PATH)
@@ -159,6 +183,11 @@ def main():
 
     torch.save(result, args.embeddings_path)
     print(f"Saved embeddings to {args.embeddings_path}")
+
+    print("\n" + "=" * 50)
+    print(f"CLAP | Latency: {result['stats']['avg_ms_per_sample']:.2f} ms/function")
+    print(f"CLAP | Memory:  {result['stats']['peak_memory_mb']:.1f} MB peak")
+    print("=" * 50)
 
     report = compute_report(result)
     report["source"] = os.path.abspath(args.embeddings_path)

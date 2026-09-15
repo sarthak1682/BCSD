@@ -1,9 +1,8 @@
 """Fine-tune hustcw/clap-asm with InfoNCE contrastive loss on the bench training set.
 
 Pairs are built round-robin within each function id (all opt/arch/compiler variants of
-the same function are mutual positives). Trains for 1 epoch and saves both the
-best-val-loss checkpoint and the final checkpoint so the existing eval.py can point
---model at the result.
+the same function are mutual positives). Holds out validation by function id and
+saves both the best-val-loss checkpoint and the final checkpoint.
 
 Input format (must match eval.py exactly):
   * Trains on the **CLAP-strict** bench train split
@@ -19,6 +18,9 @@ Example:
     python eval.py --model ./clap_finetuned \
         --embeddings_path embeddings_clap_bench_finetuned.pt \
         --report_path eval_clap_bench_finetuned_report.json
+    python eval.py --model ./clap_finetuned_best \
+        --embeddings_path embeddings_clap_bench_finetuned_best.pt \
+        --report_path eval_clap_bench_finetuned_best_report.json
 """
 
 import argparse
@@ -65,7 +67,7 @@ BATCH_SIZE = 32
 LR = 1e-5
 EPOCHS = 1
 TEMPERATURE = 0.05
-MAX_LENGTH = 1024
+MAX_LENGTH = 256
 SEED = 42
 
 
@@ -77,8 +79,7 @@ def build_pairs_by_split(
     """Round-robin (query, positive) pairs within each function id.
 
     Each element of a pair is the raw `asm` field (a list of instructions for the
-    CLAP-strict format). The val split is held out by *function id* (not by pair)
-    so that no function leaks between train and val.
+    CLAP-strict format). Validation is held out by function id to avoid leakage.
     """
     import random
 
@@ -94,7 +95,7 @@ def build_pairs_by_split(
     num_val = int(len(fids) * val_frac)
     val_fids = set(fids[:num_val])
 
-    def make_pairs(selected_fids: List[str]) -> List[Tuple[str, str]]:
+    def make_pairs(selected_fids: List[str]) -> Tuple[List[Tuple[Any, Any]], int]:
         pairs = []
         skipped = 0
         for fid in selected_fids:
@@ -109,8 +110,8 @@ def build_pairs_by_split(
                 pairs.append((query["asm"], positive["asm"]))
         return pairs, skipped
 
-    train_fids = [f for f in fids if f not in val_fids]
-    val_fids_list = [f for f in fids if f in val_fids]
+    train_fids = [fid for fid in fids if fid not in val_fids]
+    val_fids_list = [fid for fid in fids if fid in val_fids]
 
     train_pairs, train_skipped = make_pairs(train_fids)
     val_pairs, val_skipped = make_pairs(val_fids_list)
@@ -124,7 +125,7 @@ def build_pairs_by_split(
 
 
 class PairDataset(Dataset):
-    def __init__(self, pairs: List[Tuple[str, str]]):
+    def __init__(self, pairs: List[Tuple[Any, Any]]):
         self.pairs = pairs
 
     def __len__(self):
@@ -134,13 +135,13 @@ class PairDataset(Dataset):
         return self.pairs[idx]
 
 
-def collate_pairs(batch: List[Tuple[str, str]]) -> Tuple[List[str], List[str]]:
+def collate_pairs(batch: List[Tuple[Any, Any]]) -> Tuple[List[Any], List[Any]]:
     queries = [q for q, _ in batch]
     targets = [t for _, t in batch]
     return queries, targets
 
 
-def format_asm(text: str, max_length: int) -> Dict[str, str]:
+def format_asm(text: Any, max_length: int) -> Dict[str, str]:
     asm_list = text.split("\n") if isinstance(text, str) else text
     asm_list = asm_list[:max_length]
     return {str(i): inst for i, inst in enumerate(asm_list)}
@@ -212,11 +213,10 @@ def build_interleaved_embeddings(model, tokenizer, queries, targets, max_length,
 
 @torch.no_grad()
 def evaluate(model, tokenizer, loader, max_length, device, use_amp, temperature, max_batches=None) -> float:
-    """Average InfoNCE loss over the val loader.
+    """Average InfoNCE loss over the validation loader.
 
-    `max_batches` caps the number of batches evaluated. The loader uses shuffle=False,
-    so a cap yields the same deterministic subset every call -> comparable best-ckpt
-    selection without paying for the full (40k+ pair) val set each time.
+    `max_batches` keeps periodic validation deterministic and cheap because the
+    validation loader is not shuffled.
     """
     model.eval()
     total_loss = 0.0
@@ -232,6 +232,19 @@ def evaluate(model, tokenizer, loader, max_length, device, use_amp, temperature,
         total_pairs += len(queries)
     model.train()
     return total_loss / max(1, total_pairs)
+
+
+def ensure_output_paths_available(paths: List[str], overwrite: bool) -> None:
+    if overwrite:
+        return
+    existing = [path for path in paths if os.path.exists(path)]
+    if existing:
+        formatted = "\n  ".join(existing)
+        raise FileExistsError(
+            "Refusing to overwrite existing checkpoint path(s):\n"
+            f"  {formatted}\n"
+            "Choose a fresh --output_dir or pass --overwrite intentionally."
+        )
 
 
 def main():
@@ -255,12 +268,19 @@ def main():
     )
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--device", default=None, help="Override device, e.g. cuda:0 or cpu.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow writing into existing output dirs. Default is to fail before training.",
+    )
     args = parser.parse_args()
 
     set_seed(args.seed)
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.startswith("cuda")
     best_dir = args.output_dir.rstrip("/") + "_best"
+    ensure_output_paths_available([args.output_dir, best_dir], args.overwrite)
+
     print(f"Device: {device} | AMP: {use_amp}")
     print(f"Final checkpoint -> {args.output_dir}")
     print(f"Best-val checkpoint -> {best_dir}")
@@ -336,7 +356,6 @@ def main():
                 if val_loss < best_val:
                     best_val = val_loss
                     os.makedirs(best_dir, exist_ok=True)
-                    # CLAP ties word/token_type embeddings -> safetensors refuses shared tensors.
                     model.save_pretrained(best_dir, safe_serialization=False)
                     tokenizer.save_pretrained(best_dir)
                     print(f"[val] new best ({best_val:.4f}) saved to {best_dir}", flush=True)
@@ -344,7 +363,6 @@ def main():
         if running:
             print(f"epoch {epoch + 1} done | avg loss {sum(running) / len(running):.4f}", flush=True)
 
-    # Final validation pass (same deterministic subset so it's comparable to periodic vals).
     if val_loader is not None:
         val_loss = evaluate(
             model, tokenizer, val_loader, args.max_length, device, use_amp,

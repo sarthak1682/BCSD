@@ -41,3 +41,27 @@ class AttentionPooling(nn.Module):
         
         pooled_outputs = torch.sum(hidden_states * attn_weights, dim=1)
         return pooled_outputs
+
+
+class MeanLabelPooling(nn.Module):
+    """Mean-pool hidden states at Nova instruction/label token positions."""
+
+    def forward(self, hidden_states, label_positions, key_padding_mask=None):
+        B, L, _ = hidden_states.shape
+        pooled = []
+
+        for i in range(B):
+            valid_pos = [p for p in label_positions[i] if p < L]
+            if valid_pos:
+                pooled.append(hidden_states[i, valid_pos].mean(dim=0))
+                continue
+
+            if key_padding_mask is not None:
+                valid_mask = ~key_padding_mask[i, :L].to(hidden_states.device)
+                if valid_mask.any():
+                    pooled.append(hidden_states[i, valid_mask].mean(dim=0))
+                    continue
+
+            pooled.append(hidden_states[i].mean(dim=0))
+
+        return torch.stack(pooled, dim=0)

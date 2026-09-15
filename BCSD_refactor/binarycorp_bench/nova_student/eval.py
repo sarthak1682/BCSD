@@ -7,6 +7,7 @@ from transformers import AutoTokenizer
 import sys
 import os
 import random
+import re
 from collections import defaultdict
 
 # Setup paths to import shared modules and evaluation script
@@ -34,16 +35,34 @@ script_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"
 TEST_PATH = os.path.join(script_dir, "./nvemb/output_benchset_rebalanced_test_nova.jsonl")
 
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
-RUN_ID = 20
-for _subdir in ("student_best", "student_final"):
-    _candidate = f"./model_checkpoints/nova_student_bench/{_subdir}"
-    if os.path.exists(_candidate):
-        STUDENT_DIR = _candidate
-        break
-else:
-    STUDENT_DIR = os.path.join(script_dir_file, f"nova_distilled_student_{RUN_ID}_bench")
-RESULTS_PATH = os.path.join(script_dir_file, f"eval_student_bench_results_{RUN_ID}.pt")  # legacy fallback
-TSNE_PATH = os.path.join(script_dir_file, f"eval_student_bench_tsne_{RUN_ID}.png")
+EVAL_TAG = os.environ.get("EVAL_TAG", "").strip()
+STUDENT_DIR = os.environ.get("STUDENT_DIR")
+if STUDENT_DIR is None:
+    for _subdir in ("student_best", "student_final"):
+        _candidate = f"./model_checkpoints/nova_student_bench/{_subdir}"
+        if os.path.exists(_candidate):
+            STUDENT_DIR = _candidate
+            break
+    else:
+        raise RuntimeError(
+            "No default student checkpoint found. Set STUDENT_DIR to a directory "
+            "containing student_config.json, student_model.pt, and lal_head.pt."
+        )
+
+
+def _slug(value):
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    return value.strip("_.-")
+
+
+def _default_eval_label(student_dir):
+    parent = os.path.basename(os.path.dirname(os.path.abspath(student_dir)))
+    leaf = os.path.basename(os.path.abspath(student_dir))
+    return _slug(f"{parent}_{leaf}") or "nova_student"
+
+
+EVAL_LABEL = _slug(EVAL_TAG) if EVAL_TAG else _default_eval_label(STUDENT_DIR)
+EVAL_SUFFIX = f"_{EVAL_LABEL}" if EVAL_LABEL else ""
 TSNE_NUM_PAIRS = 40
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -170,16 +189,30 @@ def extract_student_embeddings(pairs, batch_size=32, max_len=1024):
     }
 
 
+def ensure_outputs_do_not_exist(paths):
+    existing = [path for path in paths if os.path.exists(path)]
+    if existing:
+        formatted = "\n".join(f"  {path}" for path in existing)
+        raise FileExistsError(
+            "Refusing to overwrite existing eval output(s):\n"
+            f"{formatted}\n"
+            "Set EVAL_TAG to a new unique label and rerun."
+        )
+
+
 def main():
     set_seed(42)
+
+    emb_dir = get_embeddings_dir("binarycorp_bench", "nova_student")
+    results_path = os.path.join(emb_dir, f"eval_bench_embeddings{EVAL_SUFFIX}.pt")
+    metrics_path = os.path.join(emb_dir, f"eval_student_bench_metrics{EVAL_SUFFIX}.json")
+    ensure_outputs_do_not_exist([results_path, metrics_path])
 
     eval_pairs = build_eval_pairs(test_samples, seed=42)
     results = extract_student_embeddings(eval_pairs, batch_size=32, max_len=1024)
 
-    emb_dir = get_embeddings_dir("binarycorp_bench", "nova_student")
-    RESULTS_PATH = os.path.join(emb_dir, "eval_bench_embeddings.pt")
-    torch.save(results, RESULTS_PATH)
-    print(f"Saved embeddings to {RESULTS_PATH}")
+    torch.save(results, results_path)
+    print(f"Saved embeddings to {results_path}")
 
     print("\n" + "="*50)
     print(f"NOVA STUDENT | Latency: {results['stats']['avg_ms_per_sample']:.2f} ms/function")
@@ -187,11 +220,10 @@ def main():
     print("="*50)
 
     report = compute_report(results)
-    report["source"] = os.path.abspath(RESULTS_PATH)
-    report["model"] = f"nova_student_run{RUN_ID}"
+    report["source"] = os.path.abspath(results_path)
+    report["model"] = f"nova_student{EVAL_SUFFIX}"
     report["data"] = os.path.abspath(TEST_PATH)
 
-    metrics_path = os.path.join(emb_dir, f"eval_student_bench_metrics_{RUN_ID}.json")
     with open(metrics_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"Saved full report to {metrics_path}")

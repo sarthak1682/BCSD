@@ -11,8 +11,11 @@ Ported from BCSD/run_benchmarks.py with the following improvements:
 Usage examples:
   python run_benchmarks.py --model nova_student --data /path/to/test.jsonl
   python run_benchmarks.py --model clap --data /path/to/test.jsonl
+  # Raw Nova zero-shot (heavy 1.3b model — use a small batch_size):
+  python run_benchmarks.py --model nova_raw --data /path/to/test.jsonl --batch_size 16
   python run_benchmarks.py --model jtrans --data /path/to/test.jsonl \\
       --jtrans_path /path/to/jTrans-finetune
+  python run_benchmarks.py --model qwen --data /path/to/test.jsonl
   python run_benchmarks.py --model nova_student --data /path/to/test.jsonl \\
       --student_dir ./model_checkpoints/nova_student/student_best \\
       --save_path ./embeddings/my_run.pt \\
@@ -32,8 +35,8 @@ _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _REPO_ROOT)
 
 from shared.data_utils import load_jsonl, get_embeddings_dir
-from shared.embedders import CLAPEmbedder, JTransEmbedder, NovaStudentEmbedder
-from shared.nova_utils import NOVA_CACHE_DIR, setup_nova_tokenizer
+from shared.embedders import CLAPEmbedder, JTransEmbedder, NovaRawEmbedder, NovaStudentEmbedder, QwenEmbedder
+from shared.nova_utils import NOVA_CACHE_DIR, load_nova, setup_nova_tokenizer
 from shared.student_model import LatentAttentionLayer, StudentDistillationModule
 
 # metrics.py lives in binarycorp3m/ (identical EvaluationEngine for 3m-style eval)
@@ -102,6 +105,21 @@ def build_nova_student_embedder(student_dir: str, device: str, batch_size: int) 
     )
 
 
+def build_nova_raw_embedder(device: str, batch_size: int) -> NovaRawEmbedder:
+    """Zero-shot embedder over the base Nova-1.3b model (no adapter, no head)."""
+    print("Loading raw Nova-1.3b (zero-shot, no adapter)...")
+    base_tokenizer, nova_tokenizer, _ = setup_nova_tokenizer()
+    device_id = 0 if device.startswith("cuda") else -1
+    base_model = load_nova(device_id=max(device_id, 0), base_tokenizer=base_tokenizer)
+    base_model.eval()
+    return NovaRawEmbedder(
+        model=base_model,
+        tokenizer=nova_tokenizer,
+        device=device,
+        batch_size=batch_size,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run inference + retrieval evaluation for BCSD models."
@@ -109,7 +127,7 @@ def main():
     parser.add_argument(
         "--model",
         required=True,
-        choices=["clap", "jtrans", "nova_student"],
+        choices=["clap", "jtrans", "nova_student", "nova_raw", "qwen"],
         help="Which embedder to evaluate.",
     )
     parser.add_argument(
@@ -127,6 +145,11 @@ def main():
         "--jtrans_path",
         default="/home/ra72yeq/projects/Embedding_Paper/jTrans/models/jTrans-finetune",
         help="Path to jTrans fine-tuned model directory (jtrans only).",
+    )
+    parser.add_argument(
+        "--qwen_path",
+        default="Qwen/Qwen2.5-Coder-0.5B",
+        help="Qwen model ID or local path (qwen only).",
     )
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument(
@@ -161,6 +184,12 @@ def main():
         embedder = JTransEmbedder(
             model_path=args.jtrans_path, device=device, batch_size=args.batch_size
         )
+    elif args.model == "qwen":
+        embedder = QwenEmbedder(
+            model_id=args.qwen_path, device=device, batch_size=args.batch_size
+        )
+    elif args.model == "nova_raw":
+        embedder = build_nova_raw_embedder(device, args.batch_size)
     else:  # nova_student
         student_dir = _resolve_student_dir(args.student_dir)
         embedder = build_nova_student_embedder(student_dir, device, args.batch_size)

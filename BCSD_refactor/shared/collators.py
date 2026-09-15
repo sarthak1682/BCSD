@@ -7,7 +7,13 @@ from shared.nova_utils import make_bidirectional_nova_mask
 
 
 class TranslationCollator:
-    """Causal-LM collator: source tokens get labels=-100, target tokens carry IDs."""
+    """Causal-LM collator using the original EBM translation sequence.
+
+    Three-field items are formatted as
+    ``source + <SEP> + target settings + target + <EOS>``. Source, separator,
+    and setting tokens get labels=-100; target and EOS tokens carry IDs.
+    Two-field items retain the legacy raw source-to-target behavior.
+    """
 
     def __init__(self, nova_tokenizer, max_length: int) -> None:
         self.tok = nova_tokenizer
@@ -16,7 +22,13 @@ class TranslationCollator:
 
     def __call__(self, batch) -> dict:
         ids_l, lbl_l, msk_l = [], [], []
-        for src, tgt in batch:
+        for item in batch:
+            if len(item) == 3:
+                src, tgt, target_settings = item
+                src = f"{src}\n<SEP> {target_settings}\n"
+                tgt = f"{tgt}\n<EOS>"
+            else:
+                src, tgt = item
             r = self.tok.encode(src, tgt, "1" * (len(src) + len(tgt)))
             L = min(len(r["input_ids"]), self.maxL)
             ids_l.append(r["input_ids"][:L])

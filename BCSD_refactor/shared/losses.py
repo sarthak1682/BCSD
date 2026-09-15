@@ -6,8 +6,8 @@ import torch.nn.functional as F
 
 def contrastive_loss(embeddings, temperature=0.05):
     """Basic InfoNCE loss for contrastive learning."""
-    embeddings = F.normalize(embeddings, p=2, dim=1)
-    sim_matrix = torch.matmul(embeddings, embeddings.T) / temperature
+    embeddings = F.normalize(embeddings.float(), p=2, dim=1)
+    sim_matrix = (torch.matmul(embeddings, embeddings.T) / temperature).float()
     batch_size = embeddings.shape[0]
 
     labels = torch.arange(batch_size, device=embeddings.device)
@@ -25,9 +25,11 @@ def contrastive_loss_positive_aware(embeddings, func_ids, temperature=0.05):
     """Contrastive loss that masks out same-function false negatives.
 
     Compatible with both python lists/sequences of IDs and PyTorch tensors.
+    Similarities are kept in float32 so CUDA autocast/bfloat16 matmuls do not
+    produce dtype mismatches when positive scores are restored after masking.
     """
-    embeddings = F.normalize(embeddings, p=2, dim=1)
-    sim_matrix = torch.matmul(embeddings, embeddings.T) / temperature
+    embeddings = F.normalize(embeddings.float(), p=2, dim=1)
+    sim_matrix = (torch.matmul(embeddings, embeddings.T) / temperature).float()
     batch_size = embeddings.shape[0]
 
     labels = torch.arange(batch_size, device=embeddings.device)
@@ -48,7 +50,7 @@ def contrastive_loss_positive_aware(embeddings, func_ids, temperature=0.05):
 
     mask_pos = torch.zeros_like(sim_matrix, dtype=torch.bool)
     mask_pos.scatter_(1, labels.unsqueeze(1), True)
-    pos_scores = (embeddings * embeddings[labels]).sum(dim=1) / temperature
+    pos_scores = (embeddings * embeddings[labels]).sum(dim=1).float() / temperature
     sim_matrix[mask_pos] = pos_scores
 
     return F.cross_entropy(sim_matrix, labels)

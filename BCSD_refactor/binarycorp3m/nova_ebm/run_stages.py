@@ -22,7 +22,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
 from metrics import EvaluationEngine
-from shared.data_utils import set_seed, load_jsonl as load_binarycorp_jsonl, get_embeddings_dir
+from shared.data_utils import (
+    set_seed, load_jsonl as load_binarycorp_jsonl, get_embeddings_dir,
+    build_ebm_translation_item,
+)
 from shared.nova_utils import make_bidirectional_nova_mask, NOVA_CACHE_DIR, MODEL_ID
 from shared.profiling import InferenceProfiler
 from shared.pooling import AttentionPooling
@@ -111,14 +114,21 @@ def _wrap_dora(model: nn.Module) -> nn.Module:
 
 class CrossOptTranslationDataset(Dataset):
     def __init__(self, samples: List[Dict], bidirectional: bool = True) -> None:
-        o0 = {s["id"]: s["asm"] for s in samples if s["opt"] == "O0"}
-        o3 = {s["id"]: s["asm"] for s in samples if s["opt"] == "O3"}
-        self.pairs: List[Tuple[str, str]] = []
-        for fid, asm0 in o0.items():
+        o0 = {s["id"]: s for s in samples if s["opt"] == "O0"}
+        o3 = {s["id"]: s for s in samples if s["opt"] == "O3"}
+        self.pairs: List[Tuple[str, str, str]] = []
+        for fid, sample0 in o0.items():
             if fid in o3:
-                self.pairs.append((asm0, o3[fid]))
+                sample3 = o3[fid]
+                self.pairs.append(build_ebm_translation_item(
+                    sample0["asm"], sample0["opt"],
+                    sample3["asm"], sample3["opt"],
+                ))
                 if bidirectional:
-                    self.pairs.append((o3[fid], asm0))
+                    self.pairs.append(build_ebm_translation_item(
+                        sample3["asm"], sample3["opt"],
+                        sample0["asm"], sample0["opt"],
+                    ))
         print(f"  {len(self.pairs):,} translation pairs "
               f"({'bidir' if bidirectional else 'unidir'})")
 

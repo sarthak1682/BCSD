@@ -24,7 +24,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../")))
 sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../")))
 
 from eval_bench import build_eval_pairs, compute_report, print_report_summary
-from shared.data_utils import set_seed, load_jsonl as load_binarycorp_jsonl, parse_bench_opt, asm_to_text, group_samples_by_id, get_embeddings_dir
+from shared.data_utils import (
+    set_seed, load_jsonl as load_binarycorp_jsonl, parse_bench_opt, asm_to_text,
+    group_samples_by_id, get_embeddings_dir, build_ebm_translation_item,
+)
 from shared.nova_utils import make_bidirectional_nova_mask, NOVA_CACHE_DIR, MODEL_ID
 from shared.pooling import AttentionPooling
 from shared.collators import TranslationCollator, PairCollator
@@ -126,7 +129,7 @@ def _wrap_dora(model: nn.Module) -> nn.Module:
 
 class CrossOptTranslationDataset(Dataset):
     def __init__(self, samples: List[Dict], bidirectional: bool = True) -> None:
-        self.pairs: List[Tuple[str, str]] = []
+        self.pairs: List[Tuple[str, str, str]] = []
         grouped = group_samples_by_id(samples)
         skipped = 0
         for fid, variants in grouped.items():
@@ -137,11 +140,13 @@ class CrossOptTranslationDataset(Dataset):
             random.shuffle(ordered)
             for idx, src in enumerate(ordered):
                 tgt = ordered[(idx + 1) % len(ordered)]
-                src_asm = asm_to_text(src["asm"])
-                tgt_asm = asm_to_text(tgt["asm"])
-                self.pairs.append((src_asm, tgt_asm))
+                self.pairs.append(build_ebm_translation_item(
+                    src["asm"], src["opt"], tgt["asm"], tgt["opt"]
+                ))
                 if bidirectional:
-                    self.pairs.append((tgt_asm, src_asm))
+                    self.pairs.append(build_ebm_translation_item(
+                        tgt["asm"], tgt["opt"], src["asm"], src["opt"]
+                    ))
         print(f"  {len(self.pairs):,} translation pairs "
               f"({'bidir' if bidirectional else 'unidir'}, {skipped} skipped)")
 

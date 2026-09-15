@@ -16,7 +16,18 @@ from eval_bench import set_seed, load_jsonl, build_eval_pairs, compute_report, p
 
 MODEL_ID = "hustcw/clap-asm"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_TEST_PATH = os.path.join(SCRIPT_DIR, "nvemb", "output_benchset_rebalanced_test_clap_strict.jsonl")
+
+def _resolve_test_path():
+    candidates = [
+        "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_test_clap_strict.jsonl",
+        os.path.join(SCRIPT_DIR, "nvemb", "output_benchset_rebalanced_test_clap_strict.jsonl"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[0]
+
+DEFAULT_TEST_PATH = _resolve_test_path()
 DEFAULT_EMBEDDINGS_PATH = os.path.join(SCRIPT_DIR, "embeddings_clap_bench.pt")
 DEFAULT_REPORT_PATH = os.path.join(SCRIPT_DIR, "eval_clap_bench_full_report.json")
 OPT_LEVELS = ("O0", "O1", "O2", "O3")

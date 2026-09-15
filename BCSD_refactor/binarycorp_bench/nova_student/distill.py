@@ -36,12 +36,15 @@ CACHE_DIR = "/home/ra72yeq/.cache/huggingface/hub/models--lt-asset--nova-1.3b/sn
 ADAPTER_PATH = os.path.abspath(os.path.join(script_dir_file, "../nova_teacher/nova_contrastive_bidir_noMNTP_bench"))
 if not os.path.exists(ADAPTER_PATH):
     ADAPTER_PATH = "/home/ra72yeq/projects/NovaXLLM2Vec/nova_contrastive_bidir_noMNTP_bench"
+FULL_EBM_TEACHER_DIR = os.path.abspath(
+    os.path.join(script_dir_file, "../../../../model_checkpoints/nova_ebm_bench/s3_final")
+)
 
 # Go up 3 levels to repository root where the jsonl files are located
 script_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
 DATA_PATH = os.path.join(script_dir, "./nvemb/output_benchset_rebalanced_train_nova.jsonl")
 
-OUTPUT_DIR = "./model_checkpoints/nova_student_bench"
+OUTPUT_DIR = "./model_checkpoints/nova_student_full_ebm_bench"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 log_path = os.path.join(OUTPUT_DIR, f"log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
@@ -59,20 +62,23 @@ def log_write(msg: str) -> None:
 BATCH_SIZE = 32
 GRAD_ACCUM = 8
 LR = 1e-4
-NUM_EPOCHS = 20
-RUN_ID = NUM_EPOCHS
-TOTAL_STEPS = None 
+PHASE_A_EPOCHS = 20
+CONTRASTIVE_MAX_EPOCHS = 10
+RUN_ID = PHASE_A_EPOCHS
+TOTAL_STEPS = None
 MAX_LENGTH = 1024
 STUDENT_LAYERS = 2
 LAMBDA_START = 1.0
 LAMBDA_END = 0.05
 VAL_SPLIT = 0.1
-EARLY_STOP_PATIENCE = 3
+CONTRASTIVE_EARLY_STOP_PATIENCE = 3
 EARLY_STOP_MIN_DELTA = 1e-4
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 sys.path.insert(0, CACHE_DIR)
 from modeling_nova import NovaForCausalLM, NovaTokenizer
+
+training_history = []
 
 log(f"Using device: {device}")
 
@@ -140,19 +146,27 @@ base_tokenizer = AutoTokenizer.from_pretrained("lt-asset/nova-1.3b", cache_dir=C
 base_tokenizer.add_special_tokens({'additional_special_tokens': ['[MASK]']})
 nova_tokenizer = NovaTokenizer(base_tokenizer)
 
-teacher_model = NovaForCausalLM.from_pretrained(
-    CACHE_DIR,
-    torch_dtype=torch.bfloat16,
-    device_map={"": 0},
-)
-teacher_model.resize_token_embeddings(len(base_tokenizer))
-
-if os.path.exists(ADAPTER_PATH):
-    log(f"Loading trained adapter from {ADAPTER_PATH}...")
-    teacher_model = PeftModel.from_pretrained(teacher_model, ADAPTER_PATH)
-    teacher_model = teacher_model.merge_and_unload() 
+if os.path.exists(FULL_EBM_TEACHER_DIR):
+    log(f"Loading merged full EBM teacher from {FULL_EBM_TEACHER_DIR}...")
+    teacher_model = NovaForCausalLM.from_pretrained(
+        FULL_EBM_TEACHER_DIR,
+        torch_dtype=torch.bfloat16,
+        device_map={"": 0},
+    )
 else:
-    log("WARNING: Adapter not found. Using raw Nova as teacher.")
+    teacher_model = NovaForCausalLM.from_pretrained(
+        CACHE_DIR,
+        torch_dtype=torch.bfloat16,
+        device_map={"": 0},
+    )
+    teacher_model.resize_token_embeddings(len(base_tokenizer))
+
+    if os.path.exists(ADAPTER_PATH):
+        log(f"Loading trained adapter from {ADAPTER_PATH}...")
+        teacher_model = PeftModel.from_pretrained(teacher_model, ADAPTER_PATH)
+        teacher_model = teacher_model.merge_and_unload()
+    else:
+        log("WARNING: Full EBM teacher and adapter not found. Using raw Nova as teacher.")
 
 teacher_model.requires_grad_(False)
 teacher_model.eval()
@@ -184,10 +198,30 @@ pair_collator = DistillCollator(nova_tokenizer, max_length=MAX_LENGTH)
 pair_loader = DataLoader(train_pairs, batch_size=BATCH_SIZE, shuffle=True, collate_fn=pair_collator, num_workers=4, pin_memory=True)
 val_loader = DataLoader(val_pairs, batch_size=BATCH_SIZE, shuffle=False, collate_fn=pair_collator, num_workers=4, pin_memory=True) if val_pairs else None
 
-TOTAL_STEPS = math.ceil(len(pair_loader) / GRAD_ACCUM) * NUM_EPOCHS
+TOTAL_STEPS = math.ceil(len(pair_loader) / GRAD_ACCUM) * PHASE_A_EPOCHS
 
 optimizer = AdamW(list(student_model.parameters()) + list(lal_head.parameters()), lr=LR)
 scheduler = get_cosine_schedule_with_warmup(optimizer, int(0.05*TOTAL_STEPS), TOTAL_STEPS)
+
+
+def save_student_checkpoint(out_dir, suffix=""):
+    os.makedirs(out_dir, exist_ok=True)
+    torch.save(student_model.state_dict(), os.path.join(out_dir, f"student_model{suffix}.pt"))
+    torch.save(lal_head.state_dict(), os.path.join(out_dir, f"lal_head{suffix}.pt"))
+    with open(os.path.join(out_dir, "student_config.json"), "w") as f:
+        json.dump(
+            {
+                "vocab_size": len(base_tokenizer),
+                "hidden_dim": HIDDEN_DIM,
+                "num_layers": STUDENT_LAYERS,
+            },
+            f,
+        )
+
+
+def save_training_history():
+    with open(os.path.join(OUTPUT_DIR, "training_history.json"), "w") as f:
+        json.dump(training_history, f, indent=2)
 
 
 def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
@@ -235,22 +269,52 @@ def evaluate_distill(student_model, lal_head, teacher_model, data_loader):
     return total / max(1, steps)
 
 
-log(f"Starting Distillation for {TOTAL_STEPS} steps...")
+@torch.no_grad()
+def evaluate_contrastive(student_model, lal_head, data_loader):
+    if data_loader is None:
+        return None
+    student_model.eval()
+    lal_head.eval()
+    total = 0.0
+    steps = 0
+    for batch in data_loader:
+        input_ids = batch['input_ids'].to(device)
+        func_ids = batch['func_ids'].to(device)
+        key_padding_mask = batch['key_padding_mask'].to(device)
+        pool_mask = batch['pool_mask'].to(device)
+
+        h_student = student_model(input_ids, key_padding_mask=key_padding_mask)
+        embeddings = lal_head(h_student, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
+        loss_contrastive = contrastive_loss_positive_aware(embeddings, func_ids)
+
+        total += loss_contrastive.item()
+        steps += 1
+
+        del h_student, embeddings, loss_contrastive
+        del input_ids, func_ids, key_padding_mask, pool_mask
+        torch.cuda.empty_cache()
+    student_model.train()
+    lal_head.train()
+    return total / max(1, steps)
+
+
+log(f"Phase A: mixed MSE + contrastive distillation for {PHASE_A_EPOCHS} epochs / {TOTAL_STEPS} steps...")
 
 student_model.train()
 lal_head.train()
 torch.cuda.empty_cache()
 gc.collect()
+optimizer.zero_grad()
 
 global_step = 0
 running_total = 0.0
 running_contrastive = 0.0
 running_distill = 0.0
-best_val_loss = float("inf")
-bad_epochs = 0
+running_count = 0
+best_phase_a_val_loss = float("inf")
 
-for epoch in range(NUM_EPOCHS):
-    for step, batch in enumerate(tqdm(pair_loader, desc=f"Epoch {epoch+1}")):
+for epoch in range(PHASE_A_EPOCHS):
+    for step, batch in enumerate(tqdm(pair_loader, desc=f"Phase A Epoch {epoch+1}")):
         
         input_ids = batch['input_ids'].to(device)
         nova_mask = batch['nova_attention_mask'].to(device)
@@ -289,11 +353,12 @@ for epoch in range(NUM_EPOCHS):
         running_total += loss_total.item()
         running_contrastive += loss_contrastive.item()
         running_distill += loss_distill.item()
+        running_count += 1
         loss_total = loss_total / GRAD_ACCUM
         
         loss_total.backward()
         
-        if (step + 1) % GRAD_ACCUM == 0:
+        if (step + 1) % GRAD_ACCUM == 0 or (step + 1) == len(pair_loader):
             torch.nn.utils.clip_grad_norm_(student_model.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(lal_head.parameters(), 1.0)
             
@@ -303,26 +368,32 @@ for epoch in range(NUM_EPOCHS):
             global_step += 1
             
             if global_step % 20 == 0:
-                avg_total = running_total / GRAD_ACCUM
-                avg_contrastive = running_contrastive / GRAD_ACCUM
-                avg_distill = running_distill / GRAD_ACCUM
+                avg_total = running_total / max(1, running_count)
+                avg_contrastive = running_contrastive / max(1, running_count)
+                avg_distill = running_distill / max(1, running_count)
+                training_history.append({
+                    "phase": "A",
+                    "event": "train_step",
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "loss": avg_total,
+                    "contrastive_loss": avg_contrastive,
+                    "distill_loss": avg_distill,
+                    "lambda_mse": lambda_mse,
+                })
+                save_training_history()
                 log_write(
-                    f" Step {global_step}: "
+                    f" Phase A Step {global_step}: "
                     f"Loss={avg_total:.4f} (Cont={avg_contrastive:.3f}, Dist={avg_distill:.3f}, "
                     f"lambda={lambda_mse:.3f})"
                 )
             running_total = 0.0
             running_contrastive = 0.0
             running_distill = 0.0
+            running_count = 0
 
         del h_selected, embeddings, loss_contrastive, loss_distill, loss_total
         del h_teacher, h_student, input_ids, nova_mask, key_padding_mask, pool_mask
-
-        if global_step >= TOTAL_STEPS:
-            break
-            
-    if global_step >= TOTAL_STEPS:
-        break
 
     # Flush GPU memory accumulated during training before validation.
     gc.collect()
@@ -330,22 +401,120 @@ for epoch in range(NUM_EPOCHS):
 
     if val_loader is not None:
         val_loss = evaluate_distill(student_model, lal_head, teacher_model, val_loader)
-        log(f"Epoch {epoch+1} Val Loss: {val_loss:.4f}")
+        log(f"Phase A Epoch {epoch+1} Val Mixed Loss: {val_loss:.4f}")
+        improved = val_loss + EARLY_STOP_MIN_DELTA < best_phase_a_val_loss
+        training_history.append({
+            "phase": "A",
+            "event": "val_epoch",
+            "epoch": epoch + 1,
+            "mixed_loss": val_loss,
+            "improved": improved,
+        })
+        save_training_history()
 
-        if val_loss + EARLY_STOP_MIN_DELTA < best_val_loss:
-            best_val_loss = val_loss
+        if improved:
+            best_phase_a_val_loss = val_loss
+            save_student_checkpoint(os.path.join(OUTPUT_DIR, "phase_a_best"), "_best")
+
+log("Phase A complete.")
+save_student_checkpoint(os.path.join(OUTPUT_DIR, "phase_a_final"))
+
+log("Releasing teacher before Phase C contrastive-only fine-tune...")
+del teacher_model
+gc.collect()
+torch.cuda.empty_cache()
+
+contrastive_total_steps = math.ceil(len(pair_loader) / GRAD_ACCUM) * CONTRASTIVE_MAX_EPOCHS
+optimizer = AdamW(list(student_model.parameters()) + list(lal_head.parameters()), lr=LR)
+scheduler = get_cosine_schedule_with_warmup(
+    optimizer,
+    int(0.05 * contrastive_total_steps),
+    contrastive_total_steps,
+)
+optimizer.zero_grad()
+
+log(
+    f"Phase C: contrastive-only fine-tune for up to {CONTRASTIVE_MAX_EPOCHS} epochs "
+    f"(patience={CONTRASTIVE_EARLY_STOP_PATIENCE})."
+)
+
+global_step = 0
+best_contrastive_val_loss = float("inf")
+bad_epochs = 0
+
+for epoch in range(CONTRASTIVE_MAX_EPOCHS):
+    running_contrastive = 0.0
+    running_count = 0
+
+    for step, batch in enumerate(tqdm(pair_loader, desc=f"Phase C Epoch {epoch+1}")):
+        input_ids = batch['input_ids'].to(device)
+        func_ids = batch['func_ids'].to(device)
+        key_padding_mask = batch['key_padding_mask'].to(device)
+        pool_mask = batch['pool_mask'].to(device)
+
+        h_student = student_model(input_ids, key_padding_mask=key_padding_mask)
+        embeddings = lal_head(h_student, key_padding_mask=key_padding_mask, pool_mask=pool_mask)
+        loss_contrastive = contrastive_loss_positive_aware(embeddings, func_ids)
+
+        running_contrastive += loss_contrastive.item()
+        running_count += 1
+        (loss_contrastive / GRAD_ACCUM).backward()
+
+        if (step + 1) % GRAD_ACCUM == 0 or (step + 1) == len(pair_loader):
+            torch.nn.utils.clip_grad_norm_(student_model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(lal_head.parameters(), 1.0)
+
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+            global_step += 1
+
+            if global_step % 20 == 0:
+                avg_contrastive = running_contrastive / max(1, running_count)
+                training_history.append({
+                    "phase": "C",
+                    "event": "train_step",
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "contrastive_loss": avg_contrastive,
+                })
+                save_training_history()
+                log_write(f" Phase C Step {global_step}: Contrastive={avg_contrastive:.4f}")
+            running_contrastive = 0.0
+            running_count = 0
+
+        del h_student, embeddings, loss_contrastive
+        del input_ids, func_ids, key_padding_mask, pool_mask
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    if val_loader is not None:
+        val_loss = evaluate_contrastive(student_model, lal_head, val_loader)
+        log(f"Phase C Epoch {epoch+1} Val Contrastive Loss: {val_loss:.4f}")
+        improved = val_loss + EARLY_STOP_MIN_DELTA < best_contrastive_val_loss
+        training_history.append({
+            "phase": "C",
+            "event": "val_epoch",
+            "epoch": epoch + 1,
+            "contrastive_loss": val_loss,
+            "improved": improved,
+        })
+        save_training_history()
+
+        if improved:
+            best_contrastive_val_loss = val_loss
             bad_epochs = 0
-            best_dir = os.path.join(OUTPUT_DIR, "student_best")
-            os.makedirs(best_dir, exist_ok=True)
-            torch.save(student_model.state_dict(), os.path.join(best_dir, "student_model_best.pt"))
-            torch.save(lal_head.state_dict(), os.path.join(best_dir, "lal_head_best.pt"))
+            save_student_checkpoint(os.path.join(OUTPUT_DIR, "student_best"), "_best")
         else:
             bad_epochs += 1
-            if bad_epochs >= EARLY_STOP_PATIENCE:
-                log("Early stopping triggered.")
+            if bad_epochs >= CONTRASTIVE_EARLY_STOP_PATIENCE:
+                log("Phase C early stopping triggered.")
                 break
 
-log("Distillation Complete.")
+save_student_checkpoint(os.path.join(OUTPUT_DIR, "phase_c_final"))
+save_training_history()
+log("Distillation + contrastive fine-tune complete.")
 
 final_dir = os.path.join(OUTPUT_DIR, "student_final")
 os.makedirs(final_dir, exist_ok=True)
