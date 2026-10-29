@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-# Setup paths to import shared modules
 sys_path_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
 import sys
 sys.path.insert(0, sys_path_dir)

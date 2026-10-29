@@ -1,5 +1,3 @@
-"""Leakage-aware BinaryCorp Bench pairs and coupled scratch collation."""
-
 from __future__ import annotations
 
 import json
@@ -87,8 +85,6 @@ def build_variant_pairs(
 
 
 def load_variant_pairs(path: str | Path, *, seed: int = 42) -> List[JointPair]:
-    """Load all multi-configuration bench pairs from JSONL."""
-
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(source)
@@ -158,8 +154,6 @@ class JointPairDataset(Dataset):
 
 
 class JointScratchCollator:
-    """Create both LM and retrieval views from every bench pair."""
-
     def __init__(
         self,
         nova_tokenizer,

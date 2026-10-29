@@ -1,53 +1,35 @@
+import argparse
 import json
-import math
+import os
+import re
+import sys
+
 import numpy as np
 import torch
-import torch.nn as nn
-from transformers import AutoTokenizer
-import sys
-import os
-import random
-import re
-from collections import defaultdict
 
-# Setup paths to import shared modules and evaluation script
 script_dir_file = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(os.path.join(script_dir_file, "../../")))
-sys.path.insert(0, os.path.abspath(os.path.join(script_dir_file, "../")))
 
-from eval_bench import set_seed, load_jsonl, build_eval_pairs, compute_report, print_report_summary
-from shared.student_model import StudentDistillationModule, LatentAttentionLayer, PositionalEncoding
+from binarycorp_bench.eval_bench import (
+    build_eval_pairs,
+    compute_report,
+    load_jsonl,
+    print_report_summary,
+    set_seed,
+)
+from shared.student_model import LatentAttentionLayer, StudentDistillationModule
 from shared.nova_utils import setup_nova_tokenizer
 from shared.data_utils import get_embeddings_dir
 from shared.profiling import InferenceProfiler
 
-try:
-    from sklearn.manifold import TSNE
-    HAS_SKLEARN = True
-except Exception:
-    TSNE = None
-    HAS_SKLEARN = False
 
-CACHE_DIR = "/home/ra72yeq/.cache/huggingface/hub/models--lt-asset--nova-1.3b/snapshots/4b4805bac4f13ef8bec678072ef60609ea3b0e77"
-
-# Go up 3 levels to repository root where the jsonl files are located
 script_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
 TEST_PATH = os.path.join(script_dir, "./nvemb/output_benchset_rebalanced_test_nova.jsonl")
+TEST_PATH = os.environ.get("EVAL_DATA", TEST_PATH)
 
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 EVAL_TAG = os.environ.get("EVAL_TAG", "").strip()
 STUDENT_DIR = os.environ.get("STUDENT_DIR")
-if STUDENT_DIR is None:
-    for _subdir in ("student_best", "student_final"):
-        _candidate = f"./model_checkpoints/nova_student_bench/{_subdir}"
-        if os.path.exists(_candidate):
-            STUDENT_DIR = _candidate
-            break
-    else:
-        raise RuntimeError(
-            "No default student checkpoint found. Set STUDENT_DIR to a directory "
-            "containing student_config.json, student_model.pt, and lal_head.pt."
-        )
 
 
 def _slug(value):
@@ -61,44 +43,11 @@ def _default_eval_label(student_dir):
     return _slug(f"{parent}_{leaf}") or "nova_student"
 
 
-EVAL_LABEL = _slug(EVAL_TAG) if EVAL_TAG else _default_eval_label(STUDENT_DIR)
-EVAL_SUFFIX = f"_{EVAL_LABEL}" if EVAL_LABEL else ""
-TSNE_NUM_PAIRS = 40
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
-base_tokenizer, nova_tokenizer, MASK_ID = setup_nova_tokenizer()
-print("Loaded tokenizer")
-
-with open(os.path.join(STUDENT_DIR, "student_config.json"), "r") as f:
-    cfg = json.load(f)
-print("Loaded cfg")
-pad_id = base_tokenizer.pad_token_id or 0
-student = StudentDistillationModule(
-    vocab_size=cfg["vocab_size"],
-    hidden_dim=cfg["hidden_dim"],
-    num_layers=cfg["num_layers"],
-    pad_id=pad_id
-).to(device).to(torch.bfloat16)
-
-lal_head = LatentAttentionLayer(hidden_dim=cfg["hidden_dim"]).to(device).to(torch.bfloat16)
-
 # student_best/ saves as student_model_best.pt; student_final/ saves as student_model.pt
 def _ckpt(name):
-    """Resolve checkpoint filename, preferring the _best suffix variant."""
     best = os.path.join(STUDENT_DIR, name.replace(".pt", "_best.pt"))
     plain = os.path.join(STUDENT_DIR, name)
     return best if os.path.exists(best) else plain
-
-student.load_state_dict(torch.load(_ckpt("student_model.pt"), map_location="cpu"))
-lal_head.load_state_dict(torch.load(_ckpt("lal_head.pt"), map_location="cpu"))
-
-student.eval()
-lal_head.eval()
-print("Loaded student and lal head")
-
-test_samples = load_jsonl(TEST_PATH)
-print("Loaded test samples")
 
 
 @torch.no_grad()
@@ -116,7 +65,6 @@ def encode_student_texts(texts, batch_size=32, max_len=1024, profiler=None):
             result = nova_tokenizer.encode("", text, char_types)
             ids = result["input_ids"][:max_len]
             all_ids_list.append(ids)
-            # If the text starts with the instruction template, mark it as query
             is_query.append(text.startswith(INSTRUCT_TEMPLATE))
 
         max_len_batch = max(len(x) for x in all_ids_list)
@@ -127,7 +75,6 @@ def encode_student_texts(texts, batch_size=32, max_len=1024, profiler=None):
         input_ids = torch.tensor(pad_ids, device=device)
         key_padding_mask = (input_ids == pad_id)
 
-        # Build pool_mask (padding + instruction prefix excluded)
         pool_mask = key_padding_mask.clone()
         for j, query in enumerate(is_query):
             if query:
@@ -201,9 +148,62 @@ def ensure_outputs_do_not_exist(paths):
 
 
 def main():
+    global STUDENT_DIR, EVAL_LABEL, EVAL_SUFFIX
+    global device, nova_tokenizer, pad_id, student, lal_head
+
+    parser = argparse.ArgumentParser(
+        description="Evaluate the Nova student on the bench split.",
+        epilog="Set STUDENT_DIR, EVAL_DATA, EVAL_TAG, and EVAL_OUTPUT_DIR as needed.",
+    )
+    parser.parse_args()
+
+    if STUDENT_DIR is None:
+        for _subdir in ("student_best", "student_final"):
+            _candidate = f"./model_checkpoints/nova_student_bench/{_subdir}"
+            if os.path.exists(_candidate):
+                STUDENT_DIR = _candidate
+                break
+        else:
+            raise RuntimeError(
+                "No default student checkpoint found. Set STUDENT_DIR to a directory "
+                "containing student_config.json, student_model.pt, and lal_head.pt."
+            )
+
+    EVAL_LABEL = _slug(EVAL_TAG) if EVAL_TAG else _default_eval_label(STUDENT_DIR)
+    EVAL_SUFFIX = f"_{EVAL_LABEL}" if EVAL_LABEL else ""
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    base_tokenizer, nova_tokenizer, MASK_ID = setup_nova_tokenizer()
+    print("Loaded tokenizer")
+
+    with open(os.path.join(STUDENT_DIR, "student_config.json"), "r") as f:
+        cfg = json.load(f)
+    print("Loaded cfg")
+    pad_id = base_tokenizer.pad_token_id or 0
+    student = StudentDistillationModule(
+        vocab_size=cfg["vocab_size"],
+        hidden_dim=cfg["hidden_dim"],
+        num_layers=cfg["num_layers"],
+        pad_id=pad_id
+    ).to(device).to(torch.bfloat16)
+
+    lal_head = LatentAttentionLayer(hidden_dim=cfg["hidden_dim"]).to(device).to(torch.bfloat16)
+
+    student.load_state_dict(torch.load(_ckpt("student_model.pt"), map_location="cpu"))
+    lal_head.load_state_dict(torch.load(_ckpt("lal_head.pt"), map_location="cpu"))
+
+    student.eval()
+    lal_head.eval()
+    print("Loaded student and lal head")
+
+    test_samples = load_jsonl(TEST_PATH)
+    print("Loaded test samples")
+
     set_seed(42)
 
-    emb_dir = get_embeddings_dir("binarycorp_bench", "nova_student")
+    emb_dir = os.environ.get("EVAL_OUTPUT_DIR") or get_embeddings_dir("binarycorp_bench", "nova_student")
+    os.makedirs(emb_dir, exist_ok=True)
     results_path = os.path.join(emb_dir, f"eval_bench_embeddings{EVAL_SUFFIX}.pt")
     metrics_path = os.path.join(emb_dir, f"eval_student_bench_metrics{EVAL_SUFFIX}.json")
     ensure_outputs_do_not_exist([results_path, metrics_path])

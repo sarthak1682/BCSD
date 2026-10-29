@@ -1,5 +1,3 @@
-"""Manifest-aligned data loading for the scratch student baseline."""
-
 from __future__ import annotations
 
 import json
@@ -193,8 +191,6 @@ def prepare_split_jsonls(
 
 
 class NovaAssemblyDataset(Dataset):
-    """Random-access JSONL dataset with lazy Nova tokenization."""
-
     def __init__(
         self,
         path: str | Path,

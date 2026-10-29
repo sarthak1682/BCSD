@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Train one coupled generation/retrieval model from random initialization."""
-
 from __future__ import annotations
 
 import argparse
@@ -49,10 +47,6 @@ from shared.losses import contrastive_loss_positive_aware  # noqa: E402
 
 def default_clap_bench_train_path() -> Path:
     candidates = [
-        Path(
-            "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/"
-            "output_benchset_rebalanced_train_clap_strict.jsonl"
-        ),
         BCSD_ROOT / "nvemb" / "output_benchset_rebalanced_train_clap_strict.jsonl",
         BCSD_ROOT / "output_benchset_rebalanced_train_clap_strict.jsonl",
     ]
@@ -890,6 +884,10 @@ def main() -> None:
                 best_validation = validation["loss"]
                 model.save_pretrained(output_dir / "best")
 
+        # Persist the latest epoch's weights on every epoch so an interrupted
+        # run can always resume from the most recent checkpoint.
+        model.save_pretrained(output_dir / "latest")
+
     model.save_pretrained(output_dir / "final")
     summary = {
         "training": "joint_scratch",
@@ -901,7 +899,7 @@ def main() -> None:
         "best_validation_loss": None if args.no_validation else best_validation,
         "final_validation": final_validation,
         "updates": global_update,
-        "checkpoints": ["final"] if args.no_validation else ["best", "final"],
+        "checkpoints": ["final"] if args.no_validation else ["best", "latest", "final"],
     }
     with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2)

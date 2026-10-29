@@ -1,18 +1,9 @@
-"""Lazy, assembly-only embedding adapters for optimization classification.
-
-This module intentionally imports neither torch nor transformers at import time.
-In particular, ``python -m opt_classification.extract --help`` must not load any
-model implementation.  The adapters also never receive optimization metadata:
-``extract.py`` passes only the assembly field to ``encode_batch``.
-"""
-
 from __future__ import annotations
 
 import hashlib
 import json
 import os
 import re
-import sys
 import tempfile
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -26,27 +17,27 @@ DEFAULT_CLAP_CHECKPOINT = str(
     REPO_ROOT / "binarycorp_bench" / "clap" / "final_finetuned"
 )
 DEFAULT_RAW_CLAP_CHECKPOINT = "hustcw/clap-asm"
-DEFAULT_JTRANS_CHECKPOINT = (
-    "/home/ra72yeq/projects/Embedding_Paper/jTrans/models/jTrans-finetune"
+DEFAULT_JTRANS_CHECKPOINT = str(
+    REPO_ROOT.parent / "jTrans" / "models" / "jTrans-finetune"
 )
 DEFAULT_BENCH_JTRANS_CHECKPOINT = str(
     REPO_ROOT / "binarycorp_bench" / "jtrans" / "jtrans_finetuned"
 )
-DEFAULT_STUDENT_CHECKPOINT = (
-    "/home/ra72yeq/BCSD/model_checkpoints/"
-    "nova_student_bench_contrastive_ft_bs64/student_best"
+DEFAULT_STUDENT_CHECKPOINT = str(
+    REPO_ROOT.parent / "model_checkpoints"
+    / "nova_student_bench_contrastive_ft_bs64" / "student_best"
 )
-DEFAULT_PRE_REFINEMENT_STUDENT_CHECKPOINT = (
-    "/home/ra72yeq/BCSD/model_checkpoints/nova_student_bench/student_best"
+DEFAULT_PRE_REFINEMENT_STUDENT_CHECKPOINT = str(
+    REPO_ROOT.parent / "model_checkpoints" / "nova_student_bench" / "student_best"
 )
-DEFAULT_EBM_FULL_CHECKPOINT = (
-    "/home/ra72yeq/model_checkpoints/nova_ebm_bench/s3_final"
+DEFAULT_EBM_FULL_CHECKPOINT = str(
+    REPO_ROOT / "model_checkpoints" / "nova_ebm_bench" / "s3_final"
 )
-DEFAULT_EBM_NO_CAUSAL_CHECKPOINT = (
-    "/home/ra72yeq/model_checkpoints/nova_ebm_s3only/s3_final"
+DEFAULT_EBM_NO_CAUSAL_CHECKPOINT = str(
+    REPO_ROOT / "model_checkpoints" / "nova_ebm_s3only" / "s3_final"
 )
-DEFAULT_EBM_S1_CHECKPOINT = (
-    "/home/ra72yeq/model_checkpoints/nova_ebm_bench/s1_final"
+DEFAULT_EBM_S1_CHECKPOINT = str(
+    REPO_ROOT / "model_checkpoints" / "nova_ebm_bench" / "s1_final"
 )
 DEFAULT_ASM2VEC_CHECKPOINT = str(
     REPO_ROOT / "binarycorp_bench" / "asm2vec" / "asm2vec_weights" / "model.pt"
@@ -59,12 +50,19 @@ DEFAULT_JOINT_SCRATCH_CHECKPOINT = str(
     / "clap_strict_30m_lm_mlm_pretrain10_cl1_trainonly_gpu1_seed42"
     / "final"
 )
+DEFAULT_L4D_EBM_CHECKPOINT = str(
+    REPO_ROOT
+    / "model_checkpoints"
+    / "llm4decompile_ebm"
+    / "20260926_044104"
+    / "s3_final"
+)
+DEFAULT_L4D_EBM_MEAN_CHECKPOINT = DEFAULT_L4D_EBM_CHECKPOINT
+DEFAULT_L4D_RAW_CHECKPOINT = "LLM4Binary/llm4decompile-1.3b-v1.5"
 
 
 @dataclass(frozen=True)
 class EmbedderSpec:
-    """Static registry entry; safe to inspect without importing ML libraries."""
-
     kind: str
     checkpoint: str
     input_format: str
@@ -74,7 +72,6 @@ class EmbedderSpec:
 
 
 MODEL_REGISTRY: Dict[str, EmbedderSpec] = {
-    # Table I deployed checkpoints.
     "clap": EmbedderSpec("clap", DEFAULT_CLAP_CHECKPOINT, "clap"),
     "jtrans": EmbedderSpec("jtrans", DEFAULT_JTRANS_CHECKPOINT, "jtrans"),
     "student": EmbedderSpec("student", DEFAULT_STUDENT_CHECKPOINT, "nova"),
@@ -93,7 +90,6 @@ MODEL_REGISTRY: Dict[str, EmbedderSpec] = {
         default_pooling="attention",
     ),
     "asm2vec": EmbedderSpec("asm2vec", DEFAULT_ASM2VEC_CHECKPOINT, "nova"),
-    # Pre/post controls.
     "clap-raw": EmbedderSpec(
         "clap", DEFAULT_RAW_CLAP_CHECKPOINT, "clap", role="control"
     ),
@@ -128,6 +124,29 @@ MODEL_REGISTRY: Dict[str, EmbedderSpec] = {
         "clap",
         default_mask="bidirectional",
         default_pooling="attention",
+    ),
+    "llm4decompile-ebm": EmbedderSpec(
+        "l4d_ebm",
+        DEFAULT_L4D_EBM_CHECKPOINT,
+        "clap",
+        default_mask="native",
+        default_pooling="attention",
+    ),
+    "llm4decompile-raw": EmbedderSpec(
+        "l4d_raw",
+        DEFAULT_L4D_RAW_CHECKPOINT,
+        "clap",
+        default_mask="native",
+        default_pooling="mean",
+        role="control",
+    ),
+    "llm4decompile-ebm-mean": EmbedderSpec(
+        "l4d_ebm",
+        DEFAULT_L4D_EBM_MEAN_CHECKPOINT,
+        "clap",
+        default_mask="native",
+        default_pooling="mean",
+        role="control",
     ),
 }
 
@@ -195,8 +214,6 @@ def _normalise_asm_text(asm: Any) -> str:
 
 
 class SharedEmbedderAdapter:
-    """Assembly-only facade over safe embedders from ``shared.embedders``."""
-
     requires_full_dataset = False
 
     def __init__(
@@ -231,13 +248,10 @@ class SharedEmbedderAdapter:
             raise ValueError(f"Unsupported shared embedder kind: {kind}")
 
     def encode_batch(self, assemblies: Sequence[Any]):
-        # Deliberately omit id/opt/settings. These embedders consume asm only.
         return self.delegate.encode_batch([{"asm": asm} for asm in assemblies])
 
 
 class StudentEmbedderAdapter:
-    """Symmetric Nova-student encoder with no instruction prefix."""
-
     requires_full_dataset = False
 
     def __init__(
@@ -290,7 +304,6 @@ class StudentEmbedderAdapter:
         encoded: List[List[int]] = []
         for asm in assemblies:
             text = _normalise_asm_text(asm)
-            # Every character is assembly. No optimization-dependent query role.
             result = self.tokenizer.encode("", text, "1" * len(text))
             ids = result["input_ids"][: self.max_length]
             if len(ids) == 0:
@@ -334,8 +347,6 @@ def _torch_load_weights(path: Path):
 
 
 class NovaEmbedderAdapter:
-    """Custom Nova encoder supporting raw/s1/s3, mask, and pooling ablations."""
-
     requires_full_dataset = False
 
     def __init__(
@@ -420,7 +431,6 @@ class NovaEmbedderAdapter:
         label_positions: List[List[int]] = []
         for asm in assemblies:
             text = _normalise_asm_text(asm)
-            # Symmetric classification contract: assembly only, no instruction.
             result = self.tokenizer.encode("", text, "1" * len(text))
             ids = result["input_ids"][: self.max_length]
             if len(ids) == 0:
@@ -490,8 +500,6 @@ def _cuda_device_index(device: str) -> int:
 
 
 class JointScratchEmbedderAdapter:
-    """Assembly-only adapter for the scratch joint generation/retrieval model."""
-
     requires_full_dataset = False
 
     def __init__(
@@ -573,9 +581,138 @@ class JointScratchEmbedderAdapter:
         return output.embeddings.detach().float().cpu()
 
 
-class Asm2VecEmbedderAdapter:
-    """Asm2Vec test-time optimization for exactly the selected manifest rows."""
+class L4DEBMEmbedderAdapter:
+    """Attention and mean pooling use the same assembly span."""
 
+    requires_full_dataset = False
+
+    def __init__(
+        self,
+        checkpoint: str,
+        *,
+        device: str,
+        batch_size: int,
+        max_length: int,
+        pooling: str = "attention",
+    ) -> None:
+        import torch
+
+        from binarycorp_bench.llm4decompile_ebm.eval import (
+            load_ebm_for_inference,
+        )
+
+        if pooling not in {"attention", "mean"}:
+            raise ValueError(
+                f"L4D-EBM pooling must be 'attention' or 'mean', got {pooling!r}"
+            )
+        self.device = torch.device(device)
+        if self.device.type != "cuda":
+            raise RuntimeError(
+                "The 1.3B LLM4Decompile EBM extractor requires a CUDA device"
+            )
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.pooling = pooling
+        (
+            self.tokenizer,
+            self.model,
+            attention_head,
+            _,
+        ) = load_ebm_for_inference(checkpoint, self.device, bidirectional=False)
+        self.pooling_head = (
+            attention_head if pooling == "attention" else MaskedMeanPoolingHead()
+        )
+
+    def encode_batch(self, assemblies: Sequence[Any]):
+        from binarycorp_bench.llm4decompile_ebm.eval import encode_assemblies
+
+        return encode_assemblies(
+            self.model,
+            self.pooling_head,
+            self.tokenizer,
+            assemblies,
+            batch_size=min(self.batch_size, len(assemblies)),
+            max_length=self.max_length,
+            device=self.device,
+            num_workers=0,
+            description=f"l4d-ebm opt embeddings ({self.pooling})",
+            bidirectional=False,
+        )
+
+
+class MaskedMeanPoolingHead:
+    """Implements the pooling-head interface without importing torch at module load."""
+
+    def eval(self) -> "MaskedMeanPoolingHead":
+        return self
+
+    def __call__(self, hidden_states, pool_mask):
+        from binarycorp_bench.nova_causal_pooling.core import masked_mean_pool
+
+        return masked_mean_pool(hidden_states, pool_mask)
+
+
+class L4DRawEmbedderAdapter:
+    """Use the EBM adapter's prompt and assembly span with the base model and mean pooling."""
+
+    requires_full_dataset = False
+
+    def __init__(
+        self,
+        checkpoint: str,
+        *,
+        device: str,
+        batch_size: int,
+        max_length: int,
+    ) -> None:
+        import torch
+
+        from binarycorp_bench.llm4decompile_causal_pooling.core import (
+            load_llm4decompile,
+        )
+        from binarycorp_bench.llm4decompile_ebm.collators import L4DAssemblyCollator
+
+        self.device = torch.device(device)
+        if self.device.type != "cuda":
+            raise RuntimeError(
+                "The 1.3B LLM4Decompile extractor requires a CUDA device"
+            )
+        self.batch_size = batch_size
+        self.max_length = max_length
+        # ``eager`` is what FrozenL4DTeacher.load() uses for the KD teacher.
+        self.tokenizer, self.model = load_llm4decompile(
+            checkpoint, self.device, attn_implementation="eager"
+        )
+        self.pooling_head = MaskedMeanPoolingHead()
+        self.collator = L4DAssemblyCollator(
+            self.tokenizer, max_length=self.max_length
+        )
+
+    def encode_batch(self, assemblies: Sequence[Any]):
+        from torch.utils.data import DataLoader
+
+        from binarycorp_bench.llm4decompile_ebm.eval import encode_loader
+        from shared.data_utils import asm_to_text
+
+        texts = [asm_to_text(assembly) for assembly in assemblies]
+        loader = DataLoader(
+            texts,
+            batch_size=min(self.batch_size, len(texts)),
+            shuffle=False,
+            collate_fn=self.collator,
+            num_workers=0,
+            pin_memory=True,
+        )
+        return encode_loader(
+            self.model,
+            self.pooling_head,
+            loader,
+            self.device,
+            description="l4d-raw opt embeddings",
+        )
+
+
+class Asm2VecEmbedderAdapter:
     requires_full_dataset = True
 
     def __init__(
@@ -596,15 +733,9 @@ class Asm2VecEmbedderAdapter:
         self.temp_root = Path(temp_root).expanduser() if temp_root else None
 
     def encode_all(self, assemblies: Sequence[Any], keys: Sequence[tuple[str, str]]):
-        """Optimize and return function vectors in the same order as ``keys``."""
-
         import torch
         import torch.nn.functional as functional
 
-        asm2vec_root = REPO_ROOT.parent / "asm2vec-pytorch"
-        if not asm2vec_root.is_dir():
-            raise FileNotFoundError(f"Asm2Vec source tree not found: {asm2vec_root}")
-        sys.path.insert(0, str(asm2vec_root))
         from asm2vec.utils import load_data, load_model, train
 
         if len(assemblies) != len(keys):
@@ -677,22 +808,10 @@ class Asm2VecEmbedderAdapter:
             return functional.normalize(stacked, p=2, dim=1)
 
 
-_ASM2VEC_LABEL_RE = re.compile(r"^<label-([0-9]+)>$")
-
-
 def _asm_to_asm2vec_text(asm: Any) -> str:
-    out = ["_block_label:"]
-    for raw in _as_lines(asm):
-        line = raw.strip()
-        if not line:
-            continue
-        match = _ASM2VEC_LABEL_RE.match(line)
-        if match:
-            out.append(f"LABEL{match.group(1)}:")
-            continue
-        line = re.sub(r"<label-([0-9]+)>", r"LABEL\1", line)
-        out.append(f"    {line}")
-    return "\n".join(out)
+    from binarycorp_bench.asm2vec.common import asm_to_asm2vec_text
+
+    return asm_to_asm2vec_text(_as_lines(asm))
 
 
 def create_embedder(
@@ -708,13 +827,16 @@ def create_embedder(
     asm2vec_epochs: int = 10,
     temp_root: Optional[str] = None,
 ):
-    """Instantiate a registered adapter, importing heavy dependencies lazily."""
-
     if model_name not in MODEL_REGISTRY:
         raise KeyError(
             f"Unknown model {model_name!r}; choices: {', '.join(list_models())}"
         )
     spec = MODEL_REGISTRY[model_name]
+    if spec.kind in {"l4d_ebm", "l4d_raw"} and nova_mask not in {None, "native"}:
+        raise ValueError(
+            "L4D adapters require the default attention setting; "
+            "--nova-mask must be native."
+        )
     resolved_checkpoint = checkpoint or spec.checkpoint
     if spec.kind in {"clap", "jtrans"}:
         return SharedEmbedderAdapter(
@@ -751,6 +873,21 @@ def create_embedder(
         )
     if spec.kind == "joint_scratch":
         return JointScratchEmbedderAdapter(
+            resolved_checkpoint,
+            device=device,
+            batch_size=batch_size,
+            max_length=max_length,
+        )
+    if spec.kind == "l4d_ebm":
+        return L4DEBMEmbedderAdapter(
+            resolved_checkpoint,
+            device=device,
+            batch_size=batch_size,
+            max_length=max_length,
+            pooling=pooling or spec.default_pooling or "attention",
+        )
+    if spec.kind == "l4d_raw":
+        return L4DRawEmbedderAdapter(
             resolved_checkpoint,
             device=device,
             batch_size=batch_size,

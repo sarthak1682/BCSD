@@ -1,5 +1,3 @@
-"""Manifest-aligned assembly data for the frozen-head opt classifier."""
-
 from __future__ import annotations
 
 import json
@@ -21,8 +19,6 @@ def build_collator(*, max_length: int) -> JointScratchCollator:
 
 
 class JointScratchAssemblyDataset(Dataset):
-    """Random-access split JSONL whose rows are encoded via the joint collator."""
-
     def __init__(self, path: str | Path, collator: JointScratchCollator) -> None:
         self.path = Path(path)
         self.collator = collator

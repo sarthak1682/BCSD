@@ -1,12 +1,3 @@
-"""Core components for frozen, native-causal Nova pooling experiments.
-
-This module deliberately does *not* call ``make_bidirectional_nova_mask``.
-Nova's official tokenizer creates a hierarchical causal mask: each block is
-lower triangular and later block-summary tokens may attend to earlier summary
-tokens.  The collator preserves that mask exactly (apart from truncation and
-batch padding) and rejects any mask containing a future-token edge.
-"""
-
 from __future__ import annotations
 
 import random
@@ -31,7 +22,6 @@ def build_bench_pairs(
     *,
     seed: int,
 ) -> List[Tuple[str, str, int]]:
-    """Build adjacent positive pairs with stable numeric function labels."""
     grouped: Dict[str, List[Dict]] = defaultdict(list)
     for sample in samples:
         parse_bench_opt(sample["opt"])
@@ -169,7 +159,6 @@ class CausalNovaPairCollator:
 
 
 def masked_mean_pool(hidden_states: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-    """Mean-pool the selected assembly-token states."""
     if hidden_states.ndim != 3 or pool_mask.ndim != 2:
         raise ValueError("Expected hidden_states [B,L,D] and pool_mask [B,L]")
     if hidden_states.shape[:2] != pool_mask.shape:
@@ -180,8 +169,6 @@ def masked_mean_pool(hidden_states: torch.Tensor, pool_mask: torch.Tensor) -> to
 
 
 class LinearMeanProbe(nn.Module):
-    """A square linear metric head over mean-pooled Nova states."""
-
     def __init__(self, hidden_dim: int) -> None:
         super().__init__()
         self.projection = nn.Linear(hidden_dim, hidden_dim, bias=False)
@@ -192,8 +179,6 @@ class LinearMeanProbe(nn.Module):
 
 
 class MaskedAttentionPooling(nn.Module):
-    """Trainable scalar attention over the same tokens used by mean pooling."""
-
     def __init__(self, hidden_dim: int) -> None:
         super().__init__()
         self.attention = nn.Sequential(
@@ -214,8 +199,6 @@ class MaskedAttentionPooling(nn.Module):
 
 
 class FrozenCausalNova(nn.Module):
-    """Expose Nova token states without the LM vocabulary projection."""
-
     def __init__(self, causal_lm: nn.Module) -> None:
         super().__init__()
         self.causal_lm = causal_lm

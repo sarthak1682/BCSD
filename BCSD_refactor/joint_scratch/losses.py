@@ -1,5 +1,3 @@
-"""Task losses and metrics for scratch joint training."""
-
 from __future__ import annotations
 
 import torch

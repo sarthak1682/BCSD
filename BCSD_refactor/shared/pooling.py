@@ -1,5 +1,3 @@
-"""Shared pooling modules for embedding extraction."""
-
 import torch
 import torch.nn as nn
 
@@ -44,8 +42,6 @@ class AttentionPooling(nn.Module):
 
 
 class MeanLabelPooling(nn.Module):
-    """Mean-pool hidden states at Nova instruction/label token positions."""
-
     def forward(self, hidden_states, label_positions, key_padding_mask=None):
         B, L, _ = hidden_states.shape
         pooled = []

@@ -1,15 +1,3 @@
-"""Two-stage representation-distillation collation on Nova-format data.
-
-The teacher is the EBM-full Nova model, which consumes Nova-format assembly
-(``<label-N>`` summary tokens plus a hierarchical ``nova_attention_mask``).
-Both student and teacher therefore tokenize the same Nova text; the student is
-a standard transformer that treats ``<label-N>`` as ordinary tokens, while the
-teacher uses its hierarchical attention.  Stage 1 builds a causal
-source->target translation view with a per-token assembly mask; Stage 2 builds
-a token-masked MLM view together with the clean teacher view and a KD mask over
-the masked positions.
-"""
-
 from __future__ import annotations
 
 from typing import Dict, List, Sequence, Tuple
@@ -29,8 +17,6 @@ INSTRUCT_SUFFIX = "\nTarget:\n"
 
 
 class RepKDCollator:
-    """Collate each pair into a Stage-1 (NTP) and Stage-2 (MLM) view."""
-
     def __init__(
         self,
         nova_tokenizer,
@@ -54,7 +40,6 @@ class RepKDCollator:
             raise ValueError("tokenizer must define mask_token_id for MLM")
 
     def _segment_token_count(self, text: str) -> int:
-        """Token count NovaTokenizer assigns to one single-type text segment."""
         if not text:
             return 0
         return len(self.base.encode(text)[1:])

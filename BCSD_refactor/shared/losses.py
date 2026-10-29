@@ -1,11 +1,8 @@
-"""Deduplicated loss functions for contrastive and distillation training tasks."""
-
 import torch
 import torch.nn.functional as F
 
 
 def contrastive_loss(embeddings, temperature=0.05):
-    """Basic InfoNCE loss for contrastive learning."""
     embeddings = F.normalize(embeddings.float(), p=2, dim=1)
     sim_matrix = (torch.matmul(embeddings, embeddings.T) / temperature).float()
     batch_size = embeddings.shape[0]
@@ -77,7 +74,6 @@ def cgte_loss(x_emb, y_emb, temperature=0.05):
 
 
 def masked_mse_loss(student_hidden, teacher_hidden, key_padding_mask):
-    """Masked Mean Squared Error loss for distilling sequence outputs."""
     valid = (~key_padding_mask).unsqueeze(-1)
     diff = (student_hidden - teacher_hidden) ** 2
     diff = diff * valid

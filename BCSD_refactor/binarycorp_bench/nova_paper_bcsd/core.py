@@ -1,14 +1,3 @@
-"""Core pieces for the Nova-paper BCSD fine-tuning baseline.
-
-This baseline follows the BCSD-specific setup described in the Nova paper:
-
-* encode assembly only, without an instruction prompt;
-* preserve Nova's native hierarchical causal mask;
-* represent a function by the mean of last-layer hidden states at Nova
-  instruction-summary label tokens (``<label-*>`` in this tokenizer);
-* train O0 query embeddings against O3 candidate embeddings using L2 distance.
-"""
-
 from __future__ import annotations
 
 import random
@@ -83,7 +72,6 @@ def build_o0_o3_pairs(
 
 
 def mean_label_pool(hidden_states: torch.Tensor, label_mask: torch.Tensor) -> torch.Tensor:
-    """Mean-pool hidden states at Nova instruction-summary label positions."""
     if hidden_states.ndim != 3 or label_mask.ndim != 2:
         raise ValueError("Expected hidden_states [B,L,D] and label_mask [B,L]")
     if hidden_states.shape[:2] != label_mask.shape:
@@ -101,7 +89,6 @@ def bcsd_l2_contrastive_loss(
     *,
     temperature: float = 1.0,
 ) -> torch.Tensor:
-    """One-way O0->O3 in-batch contrastive loss using negative L2 distance."""
     if query_embeddings.shape != target_embeddings.shape:
         raise ValueError("query and target embedding shapes must match")
     if query_embeddings.ndim != 2:
@@ -116,8 +103,6 @@ def bcsd_l2_contrastive_loss(
 
 
 class PaperBCSDCollator:
-    """Tokenize assembly-only O0/O3 pairs with Nova's native causal mask."""
-
     def __init__(
         self,
         nova_tokenizer,
@@ -204,8 +189,6 @@ class PaperBCSDCollator:
 
 
 class PaperBCSDTextCollator(PaperBCSDCollator):
-    """Tokenize assembly-only rows for embedding extraction."""
-
     def __call__(self, batch: Sequence[str]) -> Dict[str, torch.Tensor]:
         return self.batch_encoded([self.encode_assembly(item) for item in batch])
 

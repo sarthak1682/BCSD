@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Evaluate a scratch joint checkpoint on a CLAP-strict bench JSONL."""
-
 from __future__ import annotations
 
 import argparse
@@ -31,9 +29,9 @@ from joint_scratch.train import LossWeights, resolve_device, validate  # noqa: E
 from shared.data_utils import build_eval_pairs, load_jsonl  # noqa: E402
 
 
-DEFAULT_TEST_PATH = (
-    "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/"
-    "output_benchset_rebalanced_test_clap_strict.jsonl"
+DEFAULT_TEST_PATH = str(
+    REPO_ROOT.parent / "nvemb"
+    / "output_benchset_rebalanced_test_clap_strict.jsonl"
 )
 
 

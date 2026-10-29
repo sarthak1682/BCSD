@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Aggregate optimization-probe JSON files into paper-friendly artifacts."""
-
 from __future__ import annotations
 
 import argparse

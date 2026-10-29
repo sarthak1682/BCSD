@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Evaluate a pure BCSD scratch student with the Table I retrieval protocol."""
-
 from __future__ import annotations
 
 import argparse

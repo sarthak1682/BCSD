@@ -1,29 +1,3 @@
-"""Evaluate jTrans on the rebalanced Bench split (full transfer-matrix report).
-
-This mirrors `binarycorp_bench/clap/eval.py` but for jTrans, and emits the same
-bench report (pooled recalls + cross-arch/opt/compiler/obfuscation transfer
-matrices + inference cost) via `eval_bench.compute_report`.
-
-IMPORTANT — input format
-------------------------
-The `*_jtrans_strict.jsonl` files are already tokenised in jTrans' native vocab
-(e.g. tokens like `[rbp+var_xxx]`, `fs:xxx`, `callfunc_xxx`, `CONST` are *single*
-vocabulary entries). They must be fed to the tokenizer DIRECTLY. We deliberately
-do NOT apply the regex `_normalize_asm` used by `shared.embedders.JTransEmbedder`
-(that is for raw `gcc -S` asm and would corrupt strict tokens into `[UNK]`).
-
-jTrans has no instruction-tuning notion, so unlike CLAP/Nova there is no
-instruction prefix on the query side — both sides are encoded symmetrically.
-
-The jTrans-finetune checkpoint has a 2902-row position-embedding table (not the
-512 the bundled config.json claims), so we bump `max_position_embeddings`
-accordingly before loading.
-
-Usage:
-    python eval.py                         # zero-shot pretrained jTrans
-    python eval.py --model ./jtrans_finetuned   # after finetune.py (jtrans*)
-"""
-
 import argparse
 import json
 import os
@@ -38,18 +12,22 @@ import torch.nn.functional as F
 from transformers import AutoConfig, BertModel
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../")))    # binarycorp_bench/
-sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../"))) # BCSD_refactor/
+sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../")))
 
-from eval_bench import set_seed, load_jsonl, build_eval_pairs, compute_report, print_report_summary
+from binarycorp_bench.eval_bench import (
+    build_eval_pairs,
+    compute_report,
+    load_jsonl,
+    print_report_summary,
+    set_seed,
+)
 from shared.profiling import InferenceProfiler
 
-DEFAULT_MODEL = "/home/ra72yeq/projects/Embedding_Paper/jTrans/models/jTrans-finetune"
+DEFAULT_MODEL = os.path.join(script_dir, "jtrans_weights")
 
 
 def resolve_test_path():
     candidates = [
-        "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_test_jtrans_strict.jsonl",
         os.path.abspath(os.path.join(script_dir, "../../../nvemb/output_benchset_rebalanced_test_jtrans_strict.jsonl")),
         os.path.abspath(os.path.join(script_dir, "../../../output_benchset_rebalanced_test_jtrans_strict.jsonl")),
     ]
@@ -59,9 +37,7 @@ def resolve_test_path():
     return candidates[0]
 
 
-# ---------------------------------------------------------------------------
-# jTrans model + tokenizer (port of supervisor's BCSD/models.py approach)
-# ---------------------------------------------------------------------------
+# Adapted from BCSD/models.py.
 
 SPECIAL_TOKENS = ["[SEP]", "[PAD]", "[CLS]", "[MASK]"]
 UNKNOWN_TOKEN_ID = 512
@@ -120,8 +96,6 @@ def _jtrans_tokenize(vocab, text, max_length):
 
 
 class JTransBenchEmbedder:
-    """jTrans encoder for strict-format bench data (BinBertModel, pooler_output)."""
-
     def __init__(self, model_path=DEFAULT_MODEL, device="cuda", batch_size=64, max_length=512, tokenizer_path=None):
         self.device = device
         self.batch_size = batch_size

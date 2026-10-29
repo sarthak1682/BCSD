@@ -1,5 +1,3 @@
-"""Configuration for the compact joint model trained from scratch."""
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -8,8 +6,6 @@ from typing import Any, Dict
 
 @dataclass(frozen=True)
 class ScratchModelConfig:
-    """Architecture defaults for the approximately CLAP-sized model."""
-
     vocab_size: int = 32_280
     pad_id: int = 0
     d_model: int = 768
@@ -45,8 +41,6 @@ class ScratchModelConfig:
 
 
 def estimate_parameter_count(config: ScratchModelConfig) -> int:
-    """Return the exact count implied by :mod:`joint_scratch.model`."""
-
     config.validate()
     d = config.d_model
     ff = config.ff_dim

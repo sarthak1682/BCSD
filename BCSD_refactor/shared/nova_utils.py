@@ -1,10 +1,3 @@
-"""Nova model loading and tokenizer setup utilities.
-
-Deduplicated from: run_nova_ebm_stages.py, run_nova_ebm_stages_bench.py,
-train_c_bidir_no_mntp.py, eval_c_bidir_no_mntp.py, train_teacher_bench.py,
-eval_teacher_bench.py, distill_nova.py, distill_student_bench.py, etc.
-"""
-
 import os
 import sys
 
@@ -36,7 +29,6 @@ MODEL_ID = "lt-asset/nova-1.3b"
 
 
 def _ensure_nova_on_path():
-    """Add Nova model directory to sys.path if not already present."""
     if NOVA_CACHE_DIR not in sys.path:
         sys.path.insert(0, NOVA_CACHE_DIR)
 
@@ -86,5 +78,4 @@ def load_nova(from_dir=None, device_id=0, base_tokenizer=None, torch_dtype=torch
 
 
 def make_bidirectional_nova_mask(nova_mask):
-    """Symmetrize Nova attention mask to make blocks bidirectional."""
     return np.maximum(nova_mask, nova_mask.T)

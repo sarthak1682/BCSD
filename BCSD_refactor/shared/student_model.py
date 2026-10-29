@@ -1,5 +1,3 @@
-"""Student distillation model architecture modules."""
-
 import math
 import torch
 import torch.nn as nn
@@ -56,9 +54,6 @@ class StudentDistillationModule(nn.Module):
 # Paper: "NV-Embed: Improved Techniques for Training LLMs as Generalist Embedding Models"
 #        Lee et al., 2024 — https://arxiv.org/abs/2405.17428
 # Source: https://huggingface.co/nvidia/NV-Embed-v2/blob/main/modeling_nvembed.py
-#         (class LatentAttentionModel)
-# Changes: uses nn.MultiheadAttention instead of a custom Attention module;
-#          GELU + 4x expansion instead of GEGLU + 8x; adapted for our student pipeline.
 class LatentAttentionLayer(nn.Module):
     """Distills sequence into a single embedding via NV-Embed-style cross-attention.
     Q=sequence, K/V=latents; Pre-LN on both Q and context, residuals after
@@ -77,7 +72,6 @@ class LatentAttentionLayer(nn.Module):
         super().__init__()
         self.latents = nn.Parameter(torch.randn(num_latents, hidden_dim))
 
-        # Pre-LN: separate norms for query (sequence) and context (latents)
         self.norm_seq = nn.LayerNorm(hidden_dim)
         self.norm_latents = nn.LayerNorm(hidden_dim)
         self.norm_ff = nn.LayerNorm(hidden_dim)
@@ -93,16 +87,14 @@ class LatentAttentionLayer(nn.Module):
         batch_size = hidden_states.shape[0]
         latents = self.latents.unsqueeze(0).expand(batch_size, -1, -1)
 
-        # Pre-LN on both Q (sequence) and K/V (latents)
         normed_seq = self.norm_seq(hidden_states)
         normed_latents = self.norm_latents(latents)
 
         # Cross-attention: Q=sequence, K/V=latents — no mask needed on K/V (latents have no padding)
         attn_output, _ = self.cross_attn(query=normed_seq, key=normed_latents, value=normed_latents)
-        hidden_states = hidden_states + attn_output  # Residual 1
+        hidden_states = hidden_states + attn_output
 
-        # Pre-LN + FeedForward + Residual
-        hidden_states = hidden_states + self.mlp(self.norm_ff(hidden_states))  # Residual 2
+        hidden_states = hidden_states + self.mlp(self.norm_ff(hidden_states))
 
         # Masked mean pool — pool_mask excludes padding AND instruction prefix tokens;
         # falls back to key_padding_mask (padding only) if pool_mask is not supplied.

@@ -4,7 +4,6 @@ from typing import Dict
 
 
 class InferenceProfiler:
-    """Tracks asynchronous CUDA time and peak memory."""
     def __init__(self, device):
         self.device = device
         self.is_cuda = 'cuda' in str(device)

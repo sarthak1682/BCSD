@@ -1,5 +1,3 @@
-"""Frozen native-causal Nova pooling experiments."""
-
 from .core import (
     CausalNovaPairCollator,
     FrozenCausalNova,

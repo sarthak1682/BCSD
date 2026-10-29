@@ -1,5 +1,3 @@
-"""Unified training utilities for Nova model stages."""
-
 import sys
 from typing import List, Optional
 import torch

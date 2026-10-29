@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""Evaluate a joint_repkd checkpoint with a frozen-representation BCSD probe.
-
-The repkd pretraining trains the shared backbone (causal NTP + bidirectional
-MLM + hidden-state KD) but never trains the retrieval head.  This script
-therefore probes the frozen backbone directly: it encodes each assembly through
-the bidirectional (MLM) path and mean-pools the final-layer hidden states over
-non-padding tokens.  This is the "pre-CL" representation, before any
-contrastive retrieval fine-tuning.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -28,12 +18,12 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from binarycorp_bench.eval_bench import compute_report, print_report_summary  # noqa: E402
 from joint_scratch.model import ScratchJointModel  # noqa: E402
-from shared.data_utils import build_eval_pairs, load_jsonl  # noqa: E402
+from shared.data_utils import asm_to_text, build_eval_pairs, load_jsonl  # noqa: E402
 
 
-DEFAULT_TEST_PATH = (
-    "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/"
-    "output_benchset_rebalanced_test_nova.jsonl"
+DEFAULT_TEST_PATH = str(
+    REPO_ROOT.parent / "nvemb"
+    / "output_benchset_rebalanced_test_nova.jsonl"
 )
 
 
@@ -95,10 +85,17 @@ def encode_samples(
 
     def collate(batch):
         rows = []
+        max_chars = max(1, max_length * 8)
         for sample in batch:
             text = sample["asm"]
             if isinstance(text, list):
                 text = "\n".join(text)
+            text = asm_to_text(text)
+            if len(text) > max_chars:
+                clipped = text[:max_chars]
+                if "\n" in clipped:
+                    clipped = clipped.rsplit("\n", 1)[0] or clipped
+                text = clipped.rstrip() or text[:max_chars]
             encoded = tokenizer_wrapper.encode("", text, "1" * len(text))
             ids = encoded["input_ids"][:max_length]
             rows.append(ids)

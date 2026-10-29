@@ -1,48 +1,24 @@
-"""Asm2Vec evaluation on the Bench (NewData) dataset.
-
-Unlike the 3M eval (which uses the simpler pooled `EvaluationEngine`), the bench
-eval reports the full transfer matrices (cross-arch / cross-opt / cross-compiler
-/ cross-obfuscation) via `eval_bench.compute_report`.
-
-Pipeline:
-  1. Dump every test instance to a `.s` file, tracking (id, opt) per file.
-  2. Test-time optimization (asm2vec `train(mode='test')`) to get one embedding
-     per instance with the token vocabulary frozen.
-  3. Build an (id, opt) -> embedding lookup.
-  4. Re-create the same query/target eval pairs the Nova/CLAP bench evals use
-     (`build_eval_pairs`) and gather the matching embeddings.
-  5. Score with `compute_report` and save embeddings + JSON report.
-
-Requires a trained model at: binarycorp_bench/asm2vec/asm2vec_weights/model.pt
-(run train.py first).
-"""
-
-import os
-import sys
-import json
+import argparse
 import hashlib
+import json
+import os
 import shutil
+import sys
 import time
+
 import torch
 
-# Setup paths: asm2vec submodule, binarycorp_bench (for eval_bench), repo root (for shared)
 script_dir = os.path.dirname(os.path.abspath(__file__))
-asm2vec_submodule_path = os.path.abspath(os.path.join(script_dir, "../../../asm2vec-pytorch"))
-sys.path.insert(0, asm2vec_submodule_path)
-sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../")))     # binarycorp_bench/
-sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../")))  # BCSD_refactor/
+sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../")))
 
 from asm2vec.utils import load_data, load_model, train
-from common import asm_to_asm2vec_text
-from eval_bench import compute_report, print_report_summary
+from binarycorp_bench.asm2vec.common import asm_to_asm2vec_text
+from binarycorp_bench.eval_bench import compute_report, print_report_summary
 from shared.data_utils import build_eval_pairs, get_embeddings_dir, load_jsonl, set_seed
-
-set_seed(42)
 
 
 def resolve_bench_test_path():
     candidates = [
-        "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_test_nova.jsonl",
         os.path.abspath(os.path.join(script_dir, "../../../nvemb/output_benchset_rebalanced_test_nova.jsonl")),
         os.path.abspath(os.path.join(script_dir, "../../../output_benchset_rebalanced_test_nova.jsonl")),
     ]
@@ -85,10 +61,21 @@ def dump_test_data(jsonl_path, temp_dir):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data", default=None,
+                        help="Bench JSONL to evaluate (defaults to the official bench test split).")
+    parser.add_argument("--tag", default="",
+                        help="Suffix for temp dir and output filenames (unique per unseen project).")
+    parser.add_argument("--output_dir", default=None,
+                        help="Directory for embeddings/report (defaults to the asm2vec embeddings dir).")
+    args = parser.parse_args()
+    set_seed(42)
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    test_jsonl_path = resolve_bench_test_path()
-    temp_dir = os.path.join(script_dir, "asm2vec_test_temp")
+    test_jsonl_path = args.data or resolve_bench_test_path()
+    suffix = f"_{args.tag}" if args.tag else ""
+    temp_dir = os.path.join(script_dir, f"asm2vec_test_temp{suffix}")
     model_path = os.path.join(script_dir, "asm2vec_weights/model.pt")
 
     if not os.path.exists(model_path):
@@ -130,7 +117,7 @@ def main():
 
     print("Extracting per-instance embeddings...")
     model = model.cpu()
-    inst_emb = {}  # (id, opt) -> embedding tensor
+    inst_emb = {}
     for i, func in enumerate(functions):
         filename = func.meta.get('name')
         if filename is None:
@@ -144,7 +131,6 @@ def main():
 
     print(f"Built embeddings for {len(inst_emb)} instances.")
 
-    # Rebuild the exact same eval pairs the Nova/CLAP bench evals use.
     eval_samples = load_jsonl(test_jsonl_path)
     eval_pairs = build_eval_pairs(eval_samples, seed=42)
 
@@ -178,8 +164,9 @@ def main():
         },
     }
 
-    emb_dir = get_embeddings_dir("binarycorp_bench", "asm2vec")
-    save_name = os.path.join(emb_dir, "eval_bench_embeddings.pt")
+    emb_dir = args.output_dir or get_embeddings_dir("binarycorp_bench", "asm2vec")
+    os.makedirs(emb_dir, exist_ok=True)
+    save_name = os.path.join(emb_dir, f"eval_bench_embeddings{suffix}.pt")
     torch.save(eval_result, save_name)
     print(f"Embeddings saved to {save_name}")
 
@@ -191,8 +178,9 @@ def main():
     report["source"] = os.path.abspath(save_name)
     report["model"] = "asm2vec"
     report["data"] = os.path.abspath(test_jsonl_path)
+    report["inference"] = eval_result["stats"]
 
-    metrics_path = os.path.join(emb_dir, "eval_asm2vec_bench_metrics.json")
+    metrics_path = os.path.join(emb_dir, f"eval_asm2vec_bench_metrics{suffix}.json")
     with open(metrics_path, "w") as f:
         json.dump(report, f, indent=2)
     print(f"Saved full report to {metrics_path}")

@@ -1,5 +1,3 @@
-"""A CLAP-sized transformer that switches between causal and encoder modes."""
-
 from __future__ import annotations
 
 import json
@@ -184,7 +182,6 @@ class TaskConditionedJointStudent(nn.Module):
         hidden_states: torch.Tensor,
         pool_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Attention-pool selected assembly positions and project to teacher space."""
         if hidden_states.ndim != 3 or pool_mask.ndim != 2:
             raise ValueError("expected hidden_states [B,L,D] and pool_mask [B,L]")
         if hidden_states.shape[:2] != pool_mask.shape:

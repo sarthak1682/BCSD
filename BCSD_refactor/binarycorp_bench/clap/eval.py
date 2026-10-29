@@ -1,33 +1,32 @@
 import argparse
 import json
 import os
-import random
+import sys
 import time
-from collections import defaultdict
 from typing import Any, Dict, List
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
-# Setup path to import evaluation library
 script_dir = os.path.dirname(os.path.abspath(__file__))
-import sys
-sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../")))
 sys.path.insert(0, os.path.abspath(os.path.join(script_dir, "../../")))
 
-from eval_bench import set_seed, load_jsonl, build_eval_pairs, compute_report, print_report_summary
+from binarycorp_bench.eval_bench import (
+    build_eval_pairs,
+    compute_report,
+    load_jsonl,
+    print_report_summary,
+    set_seed,
+)
 from shared.profiling import InferenceProfiler
 
 MODEL_ID = "hustcw/clap-asm"
 
 def resolve_test_path():
-    """Locate the CLAP-strict bench test split (same directory as the train split)."""
     candidates = [
-        "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/output_benchset_rebalanced_test_clap_strict.jsonl",
-        os.path.abspath(os.path.join(script_dir, "../../../../nvemb/output_benchset_rebalanced_test_clap_strict.jsonl")),
-        os.path.abspath(os.path.join(script_dir, "../../../../output_benchset_rebalanced_test_clap_strict.jsonl")),
+        os.path.abspath(os.path.join(script_dir, "../../../nvemb/output_benchset_rebalanced_test_clap_strict.jsonl")),
+        os.path.abspath(os.path.join(script_dir, "../../../output_benchset_rebalanced_test_clap_strict.jsonl")),
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -193,6 +192,7 @@ def main():
     report["source"] = os.path.abspath(args.embeddings_path)
     report["model"] = args.model
     report["data"] = os.path.abspath(args.data)
+    report["inference"] = result["stats"]
 
     with open(args.report_path, "w") as f:
         json.dump(report, f, indent=2)

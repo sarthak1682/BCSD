@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Build leakage-safe optimization-classification manifests from Nova bench data."""
-
 from __future__ import annotations
 
 import argparse
@@ -19,7 +17,6 @@ QUARTET_FIELDS = ("id", "compiler", "architecture", "variant")
 
 
 def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    """Read non-empty JSON objects from a JSONL file."""
     path = Path(path)
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
@@ -54,7 +51,6 @@ def iter_id_opt_rows(path: str | Path) -> Iterable[dict[str, str]]:
 
 
 def read_key_set(path: str | Path) -> set[tuple[str, str]]:
-    """Read only the `(id, opt)` keys needed for cross-format alignment."""
     keys: set[tuple[str, str]] = set()
     path = Path(path)
     with path.open("r", encoding="utf-8") as handle:
@@ -70,7 +66,6 @@ def read_key_set(path: str | Path) -> set[tuple[str, str]]:
 
 
 def binary_group(function_id: str) -> str:
-    """Return the binary-level cluster encoded in a Nova bench function id."""
     return function_id.rsplit("__", 1)[0]
 
 
@@ -143,7 +138,6 @@ def _align_complete_quartets(
     rows: Sequence[dict[str, str]],
     alignment_key_sets: Sequence[set[tuple[str, str]]],
 ) -> tuple[list[dict[str, str]], int]:
-    """Keep a quartet only when every model-format source contains every row."""
     if not alignment_key_sets:
         return list(rows), 0
 
@@ -206,7 +200,6 @@ def _train_val_groups(
 
 
 def assert_split_disjointness(rows: Sequence[Mapping[str, Any]]) -> None:
-    """Assert pairwise function-id and binary-group disjointness across splits."""
     functions: dict[str, set[str]] = defaultdict(set)
     binaries: dict[str, set[str]] = defaultdict(set)
     for row in rows:
@@ -339,7 +332,6 @@ def build_manifest(
     alignment_paths: Sequence[str | Path] = (),
     alignment_path_groups: Sequence[Sequence[str | Path]] = (),
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    """Build and write a manifest JSONL and summary JSON."""
     alignment_key_sets = [read_key_set(path) for path in alignment_paths]
     for group in alignment_path_groups:
         combined_keys: set[tuple[str, str]] = set()

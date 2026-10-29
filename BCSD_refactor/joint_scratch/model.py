@@ -1,5 +1,3 @@
-"""One randomly initialized transformer for causal LM and BCSD retrieval."""
-
 from __future__ import annotations
 
 import json
@@ -196,13 +194,10 @@ class ScratchJointModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> ScratchJointOutput:
-        """Bidirectional masked-token prediction on the encoder/retrieval path."""
-
         hidden = self._encode(input_ids, attention_mask, Task.RETRIEVAL)
         return ScratchJointOutput(hidden_states=hidden, logits=self.lm_head(hidden))
 
     def pool_hidden(self, hidden_states: torch.Tensor, pool_mask: torch.Tensor) -> torch.Tensor:
-        """Attention-pool token states into one ``d_model`` vector per sequence."""
         if hidden_states.ndim != 3 or pool_mask.ndim != 2:
             raise ValueError("expected hidden_states [B,L,D] and pool_mask [B,L]")
         if hidden_states.shape[:2] != pool_mask.shape:

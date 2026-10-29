@@ -1,5 +1,3 @@
-"""Evaluation helpers for the scratch student baseline."""
-
 from __future__ import annotations
 
 from typing import Any

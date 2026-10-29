@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Orchestrate manifest creation, frozen extraction, probes, and reporting."""
-
 from __future__ import annotations
 
 import argparse
@@ -16,13 +14,9 @@ from .report import generate_report
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TRAIN = Path(
-    "/home/ra72yeq/BCSD/nvemb/output_benchset_rebalanced_train_nova.jsonl"
-)
-DEFAULT_TEST = Path(
-    "/home/ra72yeq/BCSD/nvemb/output_benchset_rebalanced_test_nova.jsonl"
-)
-STRICT_DATA_ROOT = Path("/home/ra72yeq/projects/NovaXLLM2Vec/nvemb")
+DEFAULT_TRAIN = REPO_ROOT.parent / "nvemb" / "output_benchset_rebalanced_train_nova.jsonl"
+DEFAULT_TEST = REPO_ROOT.parent / "nvemb" / "output_benchset_rebalanced_test_nova.jsonl"
+STRICT_DATA_ROOT = REPO_ROOT.parent / "nvemb"
 DEFAULT_CLAP_TRAIN = STRICT_DATA_ROOT / "output_benchset_rebalanced_train_clap_strict.jsonl"
 DEFAULT_CLAP_TEST = STRICT_DATA_ROOT / "output_benchset_rebalanced_test_clap_strict.jsonl"
 DEFAULT_JTRANS_TRAIN = (

@@ -1,5 +1,3 @@
-"""Qwen-specific utilities for the EBM-style pipeline."""
-
 import math
 import sys
 from types import MethodType
@@ -18,12 +16,7 @@ from shared.losses import cgte_loss, contrastive_loss_positive_aware
 from shared.profiling import InferenceProfiler
 
 
-# ---------------------------------------------------------------------------
-# EBM vocabulary
-# ---------------------------------------------------------------------------
-
 def add_ebm_special_tokens(tokenizer) -> int:
-    """Register original EBM delimiters and preprocessing tokens."""
     existing = list(tokenizer.additional_special_tokens or [])
     wanted = set(existing)
     wanted.update(EBM_BASE_SPECIAL_TOKENS)
@@ -64,18 +57,8 @@ def resize_ebm_token_embeddings(model, tokenizer) -> None:
             out_emb[token_id].copy_(out_emb[usable].mean(dim=0))
 
 
-# ---------------------------------------------------------------------------
-# Bidirectional attention
-# ---------------------------------------------------------------------------
-
 def patch_qwen_bidirectional(model: nn.Module) -> nn.Module:
-    """Patch a Qwen2 causal model body to use padding-only attention masks.
-
-    This mirrors L1NNA/binary_sim's ``CustomQwen2BiModel`` idea: the causal
-    upper-triangle mask is removed, while padding tokens remain masked. The
-    patch is applied in-place and is intentionally small so it works with the
-    stock HuggingFace Qwen model plus PEFT adapters.
-    """
+    """Use padding-only attention, following L1NNA/binary_sim CustomQwen2BiModel."""
     body = getattr(model, "model", model)
     body = getattr(body, "model", body)
     if getattr(body, "_ebm_bidirectional_patched", False):
@@ -132,9 +115,9 @@ def make_bidirectional_4d_mask(
     B, L = input_ids.shape
     pad_mask_2d = (input_ids == pad_token_id)  # [B, L]  True = pad
     # [B, 1, 1, L]
-    key_pad = pad_mask_2d.unsqueeze(1).unsqueeze(2)  # bool
+    key_pad = pad_mask_2d.unsqueeze(1).unsqueeze(2)
     # [B, 1, L, 1]
-    qry_pad = pad_mask_2d.unsqueeze(1).unsqueeze(3)  # bool
+    qry_pad = pad_mask_2d.unsqueeze(1).unsqueeze(3)
     # any pad → mask that position pair  (use logical_or for CPU bfloat16 compat)
     mask_4d = torch.where(
         torch.logical_or(qry_pad, key_pad),
@@ -144,28 +127,17 @@ def make_bidirectional_4d_mask(
     return mask_4d
 
 
-# ---------------------------------------------------------------------------
-# Last-token pooling
-# ---------------------------------------------------------------------------
-
 class QwenPoolingHead(nn.Module):
-    """Stateless last-token pooler for Qwen2 — returns the last non-padding
-    hidden state for each sequence."""
-
     def __init__(self):
         super().__init__()
-        # no learnable parameters — last-token pooling is deterministic
 
     def forward(
         self,
         hidden_states: torch.Tensor,   # [B, L, D]
         attention_mask: torch.Tensor,  # [B, L]  or [B, 1, L, L]  (1=keep, 0=pad)
     ) -> torch.Tensor:
-        # Normalise mask to 2D [B, L]
         if attention_mask.ndim == 4:
-            # 4D → squeeze to [B, L, L], take first row
             mask_2d = attention_mask.squeeze(1)[:, 0, :]  # [B, L] — first query row
-            # Values are 0 or min_dtype; convert to bool (0=pad, -inf=attend → 1=keep)
             mask_2d = (mask_2d == 0.0)
         elif attention_mask.ndim == 3:
             mask_2d = attention_mask[:, 0, :]
@@ -179,19 +151,11 @@ class QwenPoolingHead(nn.Module):
         return hidden_states.gather(1, idx).squeeze(1)  # [B, D]
 
 
-# ---------------------------------------------------------------------------
-# Collators
-# ---------------------------------------------------------------------------
-
 INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 
 
 class QwenTranslationCollator:
-    """Causal-LM collator: source → labels=-100, target → labels=token IDs.
-
-    Standard HuggingFace causal-LM format — Qwen2 handles causal masking
-    internally from the 2D attention_mask.
-    """
+    """Source labels are -100; target labels contain token IDs."""
 
     def __init__(self, tokenizer, max_length: int = 1024):
         self.tok = tokenizer
@@ -244,8 +208,6 @@ class QwenTranslationCollator:
 
 
 class QwenMNTPCollator:
-    """Masked next-token prediction batch for LLM2Vec-style bidirectional tuning."""
-
     def __init__(
         self,
         tokenizer,
@@ -347,10 +309,6 @@ class QwenPairCollator:
         return result
 
 
-# ---------------------------------------------------------------------------
-# Training
-# ---------------------------------------------------------------------------
-
 def run_qwen_train(
     model: nn.Module,
     dataloader,
@@ -369,12 +327,7 @@ def run_qwen_train(
     wandb_log=None,
     on_epoch_end: Optional[Callable[[int], None]] = None,
 ) -> None:
-    """Qwen-specific training loop — supports causal-LM (stage 1) and
-    contrastive (stage 3) with last-token pooling + DoRA.
-
-    Mirrors ``run_generic_train`` but avoids Nova-specific keys
-    (``nova_attention_mask``, ``label_positions``).
-    """
+    """Stages 1 and 3 use translation and contrastive objectives, respectively."""
     trainable = [p for p in model.parameters() if p.requires_grad]
     if pooling_head is not None:
         trainable += list(pooling_head.parameters())
@@ -403,7 +356,6 @@ def run_qwen_train(
         optimizer.zero_grad()
 
         if not causal_lm:
-            # --- contrastive: accumulate embeddings, then backprop ---
             accumulated_embs: List[torch.Tensor] = []
             accumulated_batches: List[dict] = []
 
@@ -414,7 +366,6 @@ def run_qwen_train(
             b_dev = {k: v.to(device) for k, v in batch.items()}
 
             if causal_lm:
-                # --- Stage 1: causal-LM translation ---
                 loss = model(**b_dev).loss
                 if not loss.requires_grad or torch.isnan(loss):
                     skipped += 1
@@ -474,7 +425,6 @@ def run_qwen_train(
                         wandb_log({"train/loss": avg, "train/step": step, "train/skipped": skipped})
 
             else:
-                # --- Stage 3: supervised contrastive ---
                 with torch.no_grad():
                     func_ids = b_dev.pop("func_ids", None)
                     attn_mask_2d = b_dev.pop("attn_mask_2d", None)
@@ -545,10 +495,6 @@ def run_qwen_train(
             on_epoch_end(epoch + 1)
 
 
-# ---------------------------------------------------------------------------
-# Eval embedding extraction
-# ---------------------------------------------------------------------------
-
 @torch.no_grad()
 def extract_qwen_embeddings(
     model: nn.Module,
@@ -605,7 +551,6 @@ def extract_qwen_embeddings(
             if pooling_head is not None:
                 pooled = pooling_head(hidden, attn_2d.to(device))
             else:
-                # last-token pool directly
                 lengths = attn_2d.sum(dim=1) - 1
                 lengths = lengths.clamp(min=0).to(device)
                 idx = lengths.unsqueeze(-1).unsqueeze(-1).expand(-1, 1, hidden.size(-1))

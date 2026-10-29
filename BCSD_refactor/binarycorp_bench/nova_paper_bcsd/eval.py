@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Evaluate the Nova-paper BCSD fine-tuning baseline on the bench set."""
-
 from __future__ import annotations
 
 import argparse

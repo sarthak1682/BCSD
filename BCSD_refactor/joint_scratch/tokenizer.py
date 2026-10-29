@@ -1,5 +1,3 @@
-"""Load Nova's local assembly tokenizer without loading Nova model weights."""
-
 from __future__ import annotations
 
 import os
@@ -22,8 +20,6 @@ MLM_MASK_TOKEN = "<|mask|>"
 
 
 def load_nova_tokenizer():
-    """Return the unchanged local Nova vocabulary and structured wrapper."""
-
     if NOVA_CACHE_DIR not in sys.path:
         sys.path.insert(0, NOVA_CACHE_DIR)
     from modeling_nova import NovaTokenizer

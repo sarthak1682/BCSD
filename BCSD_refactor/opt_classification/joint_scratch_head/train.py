@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Train an opt-classification head on a frozen pre-CL joint-scratch backbone."""
-
 from __future__ import annotations
 
 import argparse
@@ -43,13 +41,13 @@ DEFAULT_CHECKPOINT = (
     / "clap_strict_83m_lm_mlm_pretrain10_trainonly_gpu1_seed42"
     / "final"
 )
-DEFAULT_TRAIN_SOURCE = Path(
-    "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/"
-    "output_benchset_rebalanced_train_clap_strict.jsonl"
+DEFAULT_TRAIN_SOURCE = (
+    REPO_ROOT.parent / "nvemb"
+    / "output_benchset_rebalanced_train_clap_strict.jsonl"
 )
-DEFAULT_TEST_SOURCE = Path(
-    "/home/ra72yeq/projects/NovaXLLM2Vec/nvemb/"
-    "output_benchset_rebalanced_test_clap_strict.jsonl"
+DEFAULT_TEST_SOURCE = (
+    REPO_ROOT.parent / "nvemb"
+    / "output_benchset_rebalanced_test_clap_strict.jsonl"
 )
 
 
@@ -73,6 +71,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--patience", type=int, default=6)
+    parser.add_argument(
+        "--selection-metric",
+        choices=("val_acc", "val_loss", "val_macro_f1"),
+        default="val_acc",
+        help="Validation metric used to select the best checkpoint.",
+    )
     parser.add_argument("--precision", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--bootstrap-samples", type=int, default=1000)
     parser.add_argument("--log-every", type=int, default=100)
@@ -133,7 +137,7 @@ def save_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch: int,
-    best_val_loss: float,
+    best_score: float,
     config: dict[str, Any],
 ) -> None:
     torch.save(
@@ -141,7 +145,7 @@ def save_checkpoint(
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "best_val_loss": best_val_loss,
+            "best_score": best_score,
             "config": config,
         },
         path,
@@ -167,6 +171,12 @@ def load_checkpoint(
 
 def trainable_parameters(model: torch.nn.Module) -> list[torch.nn.Parameter]:
     return [parameter for parameter in model.parameters() if parameter.requires_grad]
+
+
+def selection_score(metrics: dict[str, Any], metric: str) -> float:
+    key = {"val_acc": "accuracy", "val_loss": "loss", "val_macro_f1": "macro_f1"}[metric]
+    value = float(metrics[key])
+    return -value if metric == "val_loss" else value
 
 
 def run_test_evaluation(
@@ -333,7 +343,7 @@ def main() -> None:
     )
     config = {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "selection_metric": "validation_loss",
+        "selection_metric": args.selection_metric,
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "manifest": str(Path(args.manifest).resolve()),
         "train_source": str(Path(args.train_source).resolve()),
@@ -391,16 +401,16 @@ def main() -> None:
         return
 
     start_epoch = 0
-    best_val_loss = float("inf")
+    best_score = float("-inf")
     best_epoch: int | None = None
     if args.resume and latest_path.is_file():
         checkpoint = load_checkpoint(
             latest_path, model=model, optimizer=optimizer, map_location=device
         )
         start_epoch = int(checkpoint["epoch"])
-        best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
+        best_score = float(checkpoint.get("best_score", float("-inf")))
         print(
-            f"resumed: start_epoch={start_epoch} best_val_loss={best_val_loss:.4f}",
+            f"resumed: start_epoch={start_epoch} best_score={best_score:.4f}",
             flush=True,
         )
     elif args.resume:
@@ -488,9 +498,10 @@ def main() -> None:
             flush=True,
         )
 
-        improved = val_metrics["loss"] < best_val_loss
+        score = selection_score(val_metrics, args.selection_metric)
+        improved = score > best_score
         if improved:
-            best_val_loss = float(val_metrics["loss"])
+            best_score = score
             best_epoch = epoch
             epochs_without_improvement = 0
             save_checkpoint(
@@ -498,7 +509,7 @@ def main() -> None:
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
-                best_val_loss=best_val_loss,
+                best_score=best_score,
                 config=config,
             )
         else:
@@ -508,13 +519,13 @@ def main() -> None:
             model=model,
             optimizer=optimizer,
             epoch=epoch,
-            best_val_loss=best_val_loss,
+            best_score=best_score,
             config=config,
         )
         if args.patience > 0 and epochs_without_improvement >= args.patience:
             print(
                 f"Early stopping after {epochs_without_improvement} epochs without "
-                "validation loss improvement.",
+                f"validation {args.selection_metric} improvement.",
                 flush=True,
             )
             break

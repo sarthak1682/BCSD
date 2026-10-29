@@ -1,10 +1,3 @@
-"""Generic data utilities shared across all scripts.
-
-Deduplicated from: run_nova_ebm_stages.py, run_nova_ebm_stages_bench.py,
-train_c_bidir_no_mntp.py, eval_c_bidir_no_mntp.py, train_teacher_bench.py,
-distill_nova.py, distill_student_bench.py, eval_bench.py, eval_student.py, etc.
-"""
-
 import json
 import os
 import random
@@ -17,7 +10,6 @@ import torch
 
 
 def set_seed(seed=42):
-    """Full reproducibility seeding (deterministic + benchmark flags)."""
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
@@ -29,7 +21,6 @@ def set_seed(seed=42):
 
 
 def load_jsonl(path: str) -> List[Dict]:
-    """Load .jsonl with columns: id, opt, asm (handles blank lines)."""
     data = []
     with open(path, 'r') as f:
         for line in f:
@@ -60,7 +51,6 @@ def parse_bench_opt(opt: str) -> Dict[str, str]:
 
 
 def asm_to_text(asm) -> str:
-    """Normalize asm field to a single string."""
     return "\n".join(asm) if isinstance(asm, list) else asm
 
 
@@ -192,7 +182,6 @@ def build_ebm_translation_item(
 
 
 def group_samples_by_id(samples: List[Dict]) -> Dict[str, List[Dict]]:
-    """Group samples by function id, validating bench opt labels."""
     grouped: Dict[str, List[Dict]] = {}
     for sample in samples:
         parse_bench_opt(sample["opt"])
@@ -201,7 +190,6 @@ def group_samples_by_id(samples: List[Dict]) -> Dict[str, List[Dict]]:
 
 
 def build_eval_pairs(samples: List[Dict], seed: int = 42) -> List[Dict]:
-    """Pair up variants of each function for retrieval evaluation."""
     grouped = defaultdict(list)
     for sample in samples:
         parse_bench_opt(sample["opt"])
@@ -225,10 +213,6 @@ def build_eval_pairs(samples: List[Dict], seed: int = 42) -> List[Dict]:
 
 
 def get_embeddings_dir(dataset: str, model: str) -> str:
-    """Return BCSD_refactor/embeddings/{dataset}/{model}/, creating it if needed.
-
-    Uses this file's location to find the repo root — no hardcoded absolute paths.
-    """
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     emb_dir = os.path.join(repo_root, "embeddings", dataset, model)
     os.makedirs(emb_dir, exist_ok=True)

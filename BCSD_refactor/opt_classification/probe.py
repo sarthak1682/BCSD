@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""Run deterministic linear probes on cached, frozen function embeddings.
-
-Embedding caches use this deliberately small ``torch.save`` schema::
-
-    {
-        "ids": list[str],            # length N
-        "opts": list[str],           # length N, full bench opt labels
-        "embeddings": Tensor[N, D],  # finite floating-point values
-        "metadata": dict,            # extraction/model provenance
-    }
-
-Extraction is intentionally outside this package. Cache rows are joined to the
-manifest by the exact ``(id, opt)`` pair.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -57,7 +42,6 @@ def _normalize_task(task: str) -> str:
 
 
 def load_embedding_cache(path: str | Path) -> dict[str, Any]:
-    """Load and validate the documented torch-save embedding cache schema."""
     path = Path(path)
     try:
         cache = torch.load(path, map_location="cpu", weights_only=False)
@@ -100,7 +84,6 @@ def align_embeddings_to_manifest(
     *,
     task: str = "4way",
 ) -> dict[str, Any]:
-    """Align cache embeddings to manifest order for the requested task."""
     task = _normalize_task(task)
     labels = TASK_LABELS[task]
     assert_split_disjointness(manifest_rows)
@@ -160,7 +143,6 @@ def compute_metrics(
     labels: Sequence[str],
     positive_scores: Sequence[float] | None = None,
 ) -> dict[str, Any]:
-    """Compute the fixed classification metric suite."""
     y_true_array = np.asarray(y_true)
     y_pred_array = np.asarray(y_pred)
     recalls = recall_score(
@@ -474,7 +456,6 @@ def run_probe_files(
     embeddings_path: str | Path,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Load manifest/cache files and run the reusable probe."""
     return run_probe(
         read_jsonl(manifest_path),
         load_embedding_cache(embeddings_path),

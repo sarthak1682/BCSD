@@ -5,7 +5,6 @@ LABEL_RE = re.compile(r"^<label-([0-9]+)>$")
 
 
 def asm_to_asm2vec_text(asm):
-    """Convert bench asm into the line-oriented format asm2vec-pytorch expects."""
     raw_lines = asm if isinstance(asm, list) else asm.split("\n")
     out_lines = ["_block_label:"]
 

@@ -1,12 +1,3 @@
-"""Frozen pre-CL joint-scratch backbone with a trainable opt-class head.
-
-This is the opt-classification analog of the BCSD frozen-head experiment: the
-pre-CL :class:`~joint_scratch.model.ScratchJointModel` backbone is kept fixed and
-only an attention-pooling + linear head is fit on top, so the same representation
-space is probed by a BCSD head (contrastive) and an optimization head
-(cross-entropy).
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -42,8 +33,6 @@ def _count(module: nn.Module) -> int:
 
 
 class JointScratchOptClassifier(nn.Module):
-    """Attention-pool frozen retrieval states and classify optimization level."""
-
     def __init__(self, backbone: ScratchJointModel, num_classes: int = 4) -> None:
         super().__init__()
         self.backbone = backbone

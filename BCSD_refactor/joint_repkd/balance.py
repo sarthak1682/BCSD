@@ -1,5 +1,3 @@
-"""Gradient-based GT/KD balancing and the teacher-first lambda schedule."""
-
 from __future__ import annotations
 
 from typing import Iterable

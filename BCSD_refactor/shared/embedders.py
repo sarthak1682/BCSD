@@ -1,23 +1,3 @@
-"""Embedder classes for inference + benchmarking.
-
-Ported from BCSD/models.py into the refactored repo.
-
-Key changes vs the original:
-  - InferenceProfiler imported from shared.profiling (identical).
-  - StudentDistillationModule / LatentAttentionLayer imported from
-    shared.student_model (refactored architecture).
-  - NovaStudentEmbedder now computes pool_mask (instruction-prefix
-    exclusion) to match the refactored LAL forward signature:
-      lal_head(hidden, key_padding_mask=..., pool_mask=...)
-    The old version had no pool_mask, so the LAL would include
-    instruction tokens in the mean pool — now consistent with eval.py.
-  - CLAPEmbedder is unchanged from the original.
-  - JTransEmbedder normalization is now opt-in (normalize=False by default)
-    for jTrans-strict data.  Set normalize=True only for raw GCC -S asm.
-  - QwenEmbedder wraps Qwen2.5-Coder-0.5B with last-token pooling and
-    bidirectional 4D attention masks for zero-shot embedding extraction.
-"""
-
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -32,10 +12,6 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer, BertModel
 from shared.profiling import InferenceProfiler
 from shared.student_model import LatentAttentionLayer, StudentDistillationModule
 
-
-# ---------------------------------------------------------------------------
-# Abstract base
-# ---------------------------------------------------------------------------
 
 class BaseEmbedder(ABC):
     def __init__(self, device: str = "cuda", batch_size: int = 32):
@@ -114,10 +90,6 @@ class BaseEmbedder(ABC):
             "stats": self.profiler.get_stats(),
         }
 
-
-# ---------------------------------------------------------------------------
-# JTrans
-# ---------------------------------------------------------------------------
 
 class JTransEmbedder(BaseEmbedder):
     SPECIAL_TOKENS = ["[SEP]", "[PAD]", "[CLS]", "[MASK]"]
@@ -223,10 +195,6 @@ class JTransEmbedder(BaseEmbedder):
         return hidden_states.pooler_output
 
 
-# ---------------------------------------------------------------------------
-# CLAP
-# ---------------------------------------------------------------------------
-
 class CLAPEmbedder(BaseEmbedder):
     def __init__(
         self,
@@ -274,20 +242,8 @@ class CLAPEmbedder(BaseEmbedder):
         return hidden_states
 
 
-# ---------------------------------------------------------------------------
-# Nova Student
-# ---------------------------------------------------------------------------
-
 class NovaStudentEmbedder(BaseEmbedder):
-    """Embedder wrapping the distilled Nova student + LatentAttentionLayer head.
-
-    Differences vs the original BCSD/models.py version:
-      - Uses the refactored LatentAttentionLayer from shared.student_model.
-        That LAL uses Q=sequence, K/V=latents (pre-LN, masked mean-pool),
-        whereas the old version used Q=latents, K/V=sequence (mean latent pool).
-      - Computes pool_mask to exclude the instruction prefix from mean pooling,
-        matching the behaviour of binarycorp3m/nova_student/eval.py.
-    """
+    """Pooling excludes padding and the query instruction prefix."""
 
     INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 
@@ -295,7 +251,7 @@ class NovaStudentEmbedder(BaseEmbedder):
         self,
         student_model: StudentDistillationModule,
         lal_head: LatentAttentionLayer,
-        tokenizer,          # NovaTokenizer instance
+        tokenizer,
         max_length: int = 1024,
         device: str = "cuda",
         batch_size: int = 32,
@@ -309,7 +265,6 @@ class NovaStudentEmbedder(BaseEmbedder):
         # For BaseEmbedder.run_inference to call .eval() on the student
         self.model = self.student
 
-        # Precompute instruction token length once for pool_mask building
         self._instruct_token_len = len(
             tokenizer.tokenizer.tokenize(self.INSTRUCT_TEMPLATE)
         )
@@ -365,32 +320,17 @@ class NovaStudentEmbedder(BaseEmbedder):
         )
 
 
-# ---------------------------------------------------------------------------
-# Raw Nova (zero-shot)
-# ---------------------------------------------------------------------------
-
 class NovaRawEmbedder(BaseEmbedder):
-    """Zero-shot embedder over the *base* Nova-1.3B model.
+    """Mean-pool label-token states, falling back to non-padding tokens when no labels exist.
 
-    No DoRA adapter and no trained pooling head — this measures what Nova gives
-    out of the box. Embeddings are produced by mean-pooling the last hidden
-    state over Nova "label" token positions (the instruction-bearing tokens the
-    trained AttentionPooling head also attends to). If a sample has no label
-    tokens, we fall back to mean-pooling all non-padding positions.
-
-    Tokenisation mirrors the teacher/EBM eval scripts: the O0 side gets the
-    instruction template prepended (treated as the query), every other opt is
-    encoded as plain assembly. The Nova attention mask is symmetrised to make
-    the per-block attention bidirectional, matching how embeddings are extracted
-    elsewhere in this repo.
-    """
+    O0 queries receive the instruction prefix. Attention is bidirectional within blocks."""
 
     INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 
     def __init__(
         self,
-        model,              # NovaForCausalLM base model
-        tokenizer,          # NovaTokenizer instance
+        model,
+        tokenizer,
         max_length: int = 1024,
         device: str = "cuda",
         batch_size: int = 16,
@@ -469,17 +409,8 @@ class NovaRawEmbedder(BaseEmbedder):
         return torch.stack(pooled, dim=0)
 
 
-# ---------------------------------------------------------------------------
-# Qwen (zero-shot, decoder with bidirectional 4D mask + last-token pool)
-# ---------------------------------------------------------------------------
-
 class QwenEmbedder(BaseEmbedder):
-    """Qwen2.5-Coder-0.5B zero-shot embedder.
-
-    Uses last-token pooling with 4D bidirectional attention masks, matching
-    the encoding strategy of the Qwen EBM pipeline.  No adapter — raw pretrained
-    model for the ``qwen`` (zero-shot) table row.
-    """
+    """Last-token pooling with a four-dimensional bidirectional attention mask."""
 
     INSTRUCT_TEMPLATE = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
 
@@ -556,7 +487,6 @@ class QwenEmbedder(BaseEmbedder):
         return out.hidden_states[-1]
 
     def pool(self, hidden_states: torch.Tensor, inputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        # Last-token pool
         attn_2d = inputs["attn_2d"].to(hidden_states.device)
         lengths = attn_2d.sum(dim=1) - 1
         lengths = lengths.clamp(min=0)

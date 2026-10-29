@@ -1,5 +1,3 @@
-"""Function-disjoint paired data and coupled Nova/student collation."""
-
 from __future__ import annotations
 
 import random
@@ -62,7 +60,6 @@ def build_joint_pairs(
     *,
     seed: int,
 ) -> List[JointPair]:
-    """Use every selected variant once as source with a same-function target."""
     grouped = group_variants(samples)
     numeric_ids = {fid: index for index, fid in enumerate(sorted(grouped))}
     rng = random.Random(seed)
@@ -100,8 +97,6 @@ class JointPairDataset(Dataset):
 
 
 class JointDistillCollator:
-    """Create coupled LM and PRED batches from exactly the same function pairs."""
-
     def __init__(
         self,
         nova_tokenizer,

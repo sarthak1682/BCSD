@@ -1,5 +1,3 @@
-"""Shared data collators for training datasets."""
-
 import numpy as np
 import torch
 from shared.data_utils import asm_to_text
@@ -176,8 +174,6 @@ class DistillCollator:
         self.max_length = max_length
         self.pad_id = nova_tokenizer.tokenizer.pad_token_id or 0
         self.instruct_template = "Instruct: Retrieve the functionally equivalent assembly code.\nQuery: "
-        # Precompute instruction token length for pool_mask construction (mirrors NV-Embed's
-        # instruction_lens used to zero out instruction tokens from mean pooling).
         self.instruct_token_len = len(nova_tokenizer.tokenizer.tokenize(self.instruct_template))
 
     def __call__(self, batch):
@@ -220,9 +216,7 @@ class DistillCollator:
 
         key_padding_mask = (pad_ids == self.pad_id)
 
-        # pool_mask: True = exclude token from LAL mean pooling.
-        # Excludes padding positions AND instruction prefix token positions (for query texts),
-        # mirroring NV-Embed's pool_mask that zeroes out instruction tokens before mean pooling.
+        # True excludes padding and the query instruction prefix from pooling.
         pool_mask = key_padding_mask.copy()
         for i, query in enumerate(is_query):
             if query:

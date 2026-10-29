@@ -1,5 +1,3 @@
-"""Representation-distillation losses for the two-stage pretraining."""
-
 from __future__ import annotations
 
 from typing import Optional
@@ -14,24 +12,11 @@ def hidden_state_distillation_loss(
     mask: torch.Tensor,
     projection: Optional[nn.Module] = None,
 ) -> torch.Tensor:
-    """Masked mean-squared error between projected student and teacher states.
+    """Masked MSE, normalized by the selected token count and teacher hidden dimension.
 
-    Matches the supervisor's definition
-
-    .. math::
-        \\mathcal{L}_{\\mathrm{KD}}
-        = \\frac{1}{N d_T}\\sum_{i} \\lVert P h_i^S - h_i^T \\rVert_2^2,
-
-    where ``N`` is the number of positions selected by ``mask`` and ``d_T`` is
-    the teacher hidden dimension.  ``projection`` maps the student hidden dim to
-    the teacher hidden dim and is omitted when they already match.
-
-    Args:
-        student_hidden: ``[B, L, d_S]`` final-layer student states.
-        teacher_hidden: ``[B, L, d_T]`` final-layer teacher states.
-        mask: ``[B, L]`` bool; True for positions to distill.
-        projection: optional ``Linear(d_S, d_T)``.
-    """
+    student_hidden: [B, L, d_S]; teacher_hidden: [B, L, d_T].
+    mask: [B, L], True for positions to distill.
+    projection maps d_S to d_T and may be omitted when they match."""
     if student_hidden.shape[:2] != teacher_hidden.shape[:2]:
         raise ValueError("student/teacher hidden sequence shapes differ")
     if student_hidden.shape[:2] != mask.shape:

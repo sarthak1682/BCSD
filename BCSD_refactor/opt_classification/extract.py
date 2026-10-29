@@ -1,19 +1,3 @@
-"""Extract per-instance embeddings for an optimization-probe manifest.
-
-The cache schema is deliberately small and shared with ``probe.py``::
-
-    {
-        "ids": list[str],
-        "opts": list[str],
-        "embeddings": torch.FloatTensor,  # [N, D], CPU
-        "metadata": dict,
-    }
-
-Input assembly is looked up by ``(id, opt)`` in model-specific JSONL files.
-Optimization/compiler/architecture fields are retained for cache alignment only
-and are never passed to a model.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -45,7 +29,7 @@ else:  # Allow help/syntax checks without importing the package's probe module.
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BENCH_DATA_ROOT = Path("/home/ra72yeq/projects/NovaXLLM2Vec/nvemb")
+BENCH_DATA_ROOT = REPO_ROOT.parent / "nvemb"
 
 DEFAULT_INPUT_JSONLS: Dict[str, Tuple[str, str]] = {
     "nova": (
@@ -75,6 +59,8 @@ DEFAULT_BATCH_SIZES = {
     "nova": 16,
     "asm2vec": 2048,
     "joint_scratch": 64,
+    "l4d_ebm": 16,
+    "l4d_raw": 16,
 }
 DEFAULT_MAX_LENGTHS = {
     "clap": 256,
@@ -83,6 +69,8 @@ DEFAULT_MAX_LENGTHS = {
     "nova": 1024,
     "asm2vec": 1024,  # recorded for provenance; asm2vec parses complete functions
     "joint_scratch": 512,
+    "l4d_ebm": 1024,
+    "l4d_raw": 1024,
 }
 
 Key = Tuple[str, str]
@@ -223,8 +211,6 @@ def load_manifest(path: str, splits: Optional[Sequence[str]] = None) -> List[dic
 def load_assembly_index(
     paths: Sequence[str], requested_keys: Optional[set[Key]] = None
 ) -> Dict[Key, Any]:
-    """Load JSONL assembly keyed by ``(id,opt)`` and reject conflicts."""
-
     index: Dict[Key, Any] = {}
     origins: Dict[Key, str] = {}
     for path in paths:
@@ -269,8 +255,6 @@ def select_assemblies(
     manifest_rows: Sequence[Mapping[str, Any]],
     assembly_index: Mapping[Key, Any],
 ) -> Tuple[List[Key], List[Any]]:
-    """Align rows and enforce the no-explicit-settings leakage contract."""
-
     keys: List[Key] = []
     assemblies: List[Any] = []
     missing: List[Key] = []
@@ -360,8 +344,6 @@ def checkpoint_hash(
     mode: str = "hash",
     verbose: bool = False,
 ) -> Tuple[str, str]:
-    """Return a content hash for local artifacts, or an identifier hash."""
-
     path = Path(checkpoint).expanduser()
     if path.is_file():
         return file_fingerprint(
@@ -406,8 +388,7 @@ def checkpoint_hash(
             print(f"Finished checkpoint directory provenance: {value[:12]}...", flush=True)
         return value, kind
 
-    # Remote Hugging Face IDs cannot be mapped to immutable bytes before model
-    # loading. Record this weaker provenance explicitly rather than pretending.
+    # Remote model IDs use an identifier hash until weights are available.
     digest = hashlib.sha256(f"model-id:{checkpoint}".encode("utf-8")).hexdigest()
     return digest, "sha256-model-identifier"
 
@@ -452,12 +433,12 @@ def build_metadata(
     spec = MODEL_REGISTRY[args.model]
     resolved_mask = (
         args.nova_mask or spec.default_mask or "native"
-        if spec.kind in {"nova", "joint_scratch"}
+        if spec.kind in {"nova", "joint_scratch", "l4d_ebm", "l4d_raw"}
         else None
     )
     resolved_pooling = (
         args.pooling or spec.default_pooling or "mean"
-        if spec.kind in {"nova", "joint_scratch"}
+        if spec.kind in {"nova", "joint_scratch", "l4d_ebm", "l4d_raw"}
         else None
     )
     if resolved_pooling == "auto":
